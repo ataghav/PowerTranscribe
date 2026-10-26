@@ -1,0 +1,31 @@
+[project]
+name = "meeting-transcriber"
+version = "0.1.0"
+description = "Local English meeting transcription with anonymous speakers on AMD ROCm"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "torch[device-gfx1151]==2.14.0+rocm10.1.0",
+  "torchvision[device-gfx1151]==0.29.0a0+rocm10.1.0",
+  "torchaudio==2.11.0.3+rocm10.1.0",
+  "transformers==5.20.2",
+  "numpy>=2,<3",
+  "accelerate>=1.1,<2",
+  "librosa>=0.11,<0.12",
+  "soundfile>=0.13,<0.14",
+  "sentencepiece>=0.2,<0.3",
+  "jinja2>=3.1,<4",
+]
+
+[tool.uv]
+package = false
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+# AMD's index also supplies dependencies of the device-gfx1151 extra.
+[[tool.uv.index]]
+name = "amd"
+url = "https://stable.repo.amd.com/rocm/whl-next/"
+
+[tool.uv.sources]
+torch = { index = "amd" }
+torchvision = { index = "amd" }
+torchaudio = { index = "amd" }
