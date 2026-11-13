@@ -30,7 +30,7 @@ uv run python transcribe.py meeting.m4a --config transcribe.toml --out result.tr
 uv run python transcribe.py meeting.m4a --out plain.transcript --no-timestamps
 ```
 
-Existing output directories are preserved. Repeating the same command automatically selects a fresh numbered sibling, such as `result-2.transcript/`, and prints the selected directory. `--debug` adds GPU synchronization at stage boundaries. Use `--help` for the CLI options.
+Existing output directories are preserved. Repeating the same command automatically selects a fresh numbered sibling, such as `result-2.transcript/`, and prints the selected directory. `--debug` enables detailed console diagnostics, model-loading progress bars, tracebacks, and GPU synchronization at stage boundaries. Without it, the console shows the output location, transcript, completion message, and actionable warnings/errors. Detailed stage and memory logs remain in `run.log`; full failure tracebacks are saved there even in normal mode. `--check` explicitly prints its resource-validation summary. Use `--help` for the CLI options.
 
 ## Limits and resource validation
 

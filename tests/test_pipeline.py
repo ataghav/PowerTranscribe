@@ -1,7 +1,8 @@
 import dataclasses
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 import io
 import json
+import logging
 from pathlib import Path
 import tempfile
 import unittest
@@ -210,6 +211,53 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'stay inside output'):
                 transcribe.requested_output_path(Path('../outside'), source)
             self.assertEqual(transcribe.requested_output_path(self.directory/'external', source), self.directory/'external')
+
+    def test_console_is_quiet_without_debug_and_file_keeps_diagnostics(self):
+        from transformers.utils import logging as transformers_logging
+
+        original_handlers = list(transcribe.LOGGER.handlers)
+        original_level = transcribe.LOGGER.level
+        original_propagate = transcribe.LOGGER.propagate
+        progress = transformers_logging.is_progress_bar_enabled()
+        try:
+            for debug in (False, True):
+                terminal = io.StringIO()
+                transcribe.LOGGER.handlers = []
+                path = self.directory/f'logging-{debug}.log'
+                with redirect_stderr(terminal):
+                    transcribe.configure_logging(debug)
+                    file_handler = logging.FileHandler(path)
+                    transcribe.LOGGER.addHandler(file_handler)
+                    transcribe.log('tensor-shape diagnostic')
+                    transcribe.log('Output directory: result', console=True)
+                    transcribe.LOGGER.warning('actionable warning')
+                    transcribe.LOGGER.debug('stage memory details')
+                    try:
+                        raise RuntimeError('test failure')
+                    except RuntimeError:
+                        transcribe.LOGGER.exception('Transcription failed: test failure')
+                    self.assertEqual(transformers_logging.is_progress_bar_enabled(), debug)
+                    for handler in transcribe.LOGGER.handlers:
+                        handler.flush()
+                console, saved = terminal.getvalue(), path.read_text()
+                self.assertIn('Output directory: result', console)
+                self.assertIn('actionable warning', console)
+                self.assertIn('Transcription failed: test failure', console)
+                for detail in ('tensor-shape diagnostic', 'stage memory details', 'Traceback'):
+                    self.assertEqual(detail in console, debug)
+                    self.assertIn(detail, saved)
+                for handler in transcribe.LOGGER.handlers:
+                    handler.close()
+        finally:
+            for handler in transcribe.LOGGER.handlers:
+                handler.close()
+            transcribe.LOGGER.handlers = original_handlers
+            transcribe.LOGGER.setLevel(original_level)
+            transcribe.LOGGER.propagate = original_propagate
+            if progress:
+                transformers_logging.enable_progress_bar()
+            else:
+                transformers_logging.disable_progress_bar()
 
     def test_attribution_sweep_retains_future_turns_for_nested_words(self):
         turns = [dict(start=0., end=.5, speaker='SPEAKER_01'),

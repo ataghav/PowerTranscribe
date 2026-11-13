@@ -41,8 +41,38 @@ REVISIONS = {
 }
 
 
-def log(message):
-    LOGGER.info(message)
+def log(message, console=False):
+    LOGGER.log(logging.INFO if console else logging.DEBUG, message)
+
+
+class ConsoleFormatter(logging.Formatter):
+    def __init__(self, debug):
+        super().__init__('%(asctime)s %(levelname)s %(message)s')
+        self.debug = debug
+
+    def format(self, record):
+        # Keep full tracebacks in run.log; normal console errors stay concise.
+        return super().format(record) if self.debug else record.getMessage()
+
+
+def configure_logging(debug):
+    from transformers.utils import logging as transformers_logging
+
+    LOGGER.setLevel(logging.DEBUG)
+    LOGGER.propagate = False
+    for handler in list(LOGGER.handlers):
+        if handler.name == 'transcribe-console':
+            LOGGER.removeHandler(handler)
+            handler.close()
+    console = logging.StreamHandler()
+    console.name = 'transcribe-console'
+    console.setLevel(logging.DEBUG if debug else logging.INFO)
+    console.setFormatter(ConsoleFormatter(debug))
+    LOGGER.addHandler(console)
+    if debug:
+        transformers_logging.enable_progress_bar()
+    else:
+        transformers_logging.disable_progress_bar()
 
 
 def gpu_memory():
@@ -74,7 +104,7 @@ def stage(name):
         if DEBUG and torch.cuda.is_available():
             torch.cuda.synchronize()
     except Exception:
-        LOGGER.error("Failed %s after %.1fs; %s", name, time.monotonic() - started, gpu_memory())
+        LOGGER.debug("Failed %s after %.1fs; %s", name, time.monotonic() - started, gpu_memory())
         raise
     else:
         log(f"Finished {name} in {time.monotonic() - started:.1f}s; {gpu_memory()}")
@@ -443,6 +473,7 @@ def main():
     args = parser.parse_args()
     global DEBUG, MONITOR
     DEBUG = args.debug
+    configure_logging(DEBUG)
     try:
         config = Settings.read(args.config)
         source = resolve_audio_path(args.audio)
@@ -460,12 +491,13 @@ def main():
     log(f'Preflight passed: {preflight}')
     log('RAM budget is monitored, not an OS reservation; GPU budget caps the PyTorch allocator, not driver allocations.')
     if args.check:
-        log(f'Output directory for next run: {out}')
-        log(resources.describe())
+        log('Preflight checks passed.', console=True)
+        log(f'Output directory for next run: {out}', console=True)
+        log(resources.describe(), console=True)
         return
     out = select_output_directory(requested_out, reserve=True)
     resources.directory = out
-    log(f'Output directory: {out}')
+    log(f'Output directory: {out}', console=True)
     if out != requested_out:
         log(f'Preserved existing output at {requested_out}; using a fresh directory for this rerun.')
     handler = logging.FileHandler(out/'run.log', encoding='utf-8')
@@ -494,7 +526,8 @@ def main():
         with stage('speaker attribution and export'):
             export(out, store, source, resources, include_timestamps=not args.no_timestamps)
         completed = True
-        log(f'Saved transcript to {out}; {resources.describe()}')
+        log(f'Saved transcript to {out}', console=True)
+        log(resources.describe())
     except torch.OutOfMemoryError as error:
         raise ResourceLimitError(
             f'Inference could not allocate memory with gpu_budget_gib={config.gpu_budget_gib}; '
@@ -520,11 +553,6 @@ def main():
 
 
 if __name__ == "__main__":
-    LOGGER.setLevel(logging.INFO)
-    console = logging.StreamHandler()
-    console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    LOGGER.addHandler(console)
-    LOGGER.propagate = False
     try:
         main()
     except Exception as error:
