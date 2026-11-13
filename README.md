@@ -53,6 +53,8 @@ MIOPEN_ENABLE_LOGGING=1 MIOPEN_ENABLE_LOGGING_CMD=1 MIOPEN_LOG_LEVEL=6 \
 
 These settings follow [AMD's MIOpen logging documentation](https://rocm.docs.amd.com/projects/MIOpen/en/develop/reference/env_variables.html). Detailed logs can be large. Debug synchronization can slow execution.
 
+Diarization inference uses PyTorch's built-in [MIOpen immediate mode](https://docs.pytorch.org/docs/2.14/backends.html#torch.backends.miopen.immediate). On the Radeon 8060S, the default solver search failed with `Invalid elapsed time` and `miopenStatusUnknownError` for an upsampler input of shape `(1, 192, 486)`. Immediate mode passed the same convolution against a CPU reference. The setting is scoped to diarization; the previous backend setting is restored afterward.
+
 Recording duration affects decoded audio size and the whole-recording diarization input, but Nemotron internally processes chunks with a shared speaker cache. A convolution algorithm selection error alone does not establish that GPU memory ran out. Compare the failure stage, tensor shapes, and memory figures against a successful file. To isolate duration, create a short excerpt with FFmpeg and run it through the same pipeline:
 
 ```bash
@@ -79,7 +81,7 @@ Illustrative output:
 - The input is downmixed to mono. This is for a mixed meeting recording, not separately recorded participant channels.
 - Models run sequentially on the AMD GPU. Enrollment and pyannote dependencies have been removed.
 
-Diarization can still merge or split people; consistent labels are the model's objective, not a guarantee. Diagnostic logging has been checked locally; GPU inference has not been validated in the development environment.
+Diarization can still merge or split people; consistent labels are the model's objective, not a guarantee. On the Radeon 8060S, validation covered diagnostic logging, the failing convolution against a CPU reference, and complete diarization of the 76.4-minute panel recording (837 turns, six speaker labels). Full transcription quality has not been evaluated.
 
 ## Setup references
 

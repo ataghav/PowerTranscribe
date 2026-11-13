@@ -116,7 +116,8 @@ def diarize(audio):
     with stage("diarization preprocessing and GPU transfer"):
         inputs = processor(audio, sampling_rate=SR, return_tensors="pt").to(DEVICE, torch.float32)
         log_inputs(inputs)
-    with stage("diarization model forward"), torch.inference_mode():
+    # Avoid MIOpen's failing solver-timing search for some upsampler chunk shapes.
+    with stage("diarization model forward"), torch.inference_mode(), torch.backends.miopen.flags(immediate=True):
         output = model(**inputs)
     with stage("diarization speaker extraction"):
         log(f"Diarization logits: shape={tuple(output.logits.shape)}, dtype={output.logits.dtype}")
