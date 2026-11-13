@@ -2,14 +2,17 @@
 """uv run python transcribe.py meeting.wav [--out result]"""
 import argparse
 from collections import defaultdict
+from contextlib import contextmanager
 import gc
 import json
+import logging
 import math
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
@@ -25,6 +28,8 @@ DEVICE = "cuda:0"  # PyTorch uses the cuda namespace for AMD ROCm too.
 ASR = "Qwen/Qwen3-ASR-1.7B-hf"
 ALIGNER = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
 DIARIZER = "nvidia/Nemotron-3-Diarization"
+LOGGER = logging.getLogger("transcribe")
+DEBUG = False
 REVISIONS = {
     ASR: "bcd2b5b7f32b480ab5790554cfa8347f246a14f3",
     ALIGNER: "c07281df297b9905d24a508279258cccf987a064",
@@ -33,7 +38,42 @@ REVISIONS = {
 
 
 def log(message):
-    print(message, file=sys.stderr, flush=True)
+    LOGGER.info(message)
+
+
+def gpu_memory():
+    if not torch.cuda.is_available():
+        return "GPU unavailable"
+    try:
+        free, total = torch.cuda.mem_get_info()
+        gib = 1024 ** 3
+        return (f"GPU GiB: allocated={torch.cuda.memory_allocated() / gib:.2f}, "
+                f"reserved={torch.cuda.memory_reserved() / gib:.2f}, "
+                f"peak={torch.cuda.max_memory_allocated() / gib:.2f}, "
+                f"free={free / gib:.2f}/{total / gib:.2f}")
+    except Exception as error:
+        return f"GPU memory query unavailable: {error}"
+
+
+@contextmanager
+def stage(name):
+    started = time.monotonic()
+    log(f"Starting {name}; {gpu_memory()}")
+    try:
+        yield
+        if DEBUG and torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except Exception:
+        LOGGER.error("Failed %s after %.1fs; %s", name, time.monotonic() - started, gpu_memory())
+        raise
+    else:
+        log(f"Finished {name} in {time.monotonic() - started:.1f}s; {gpu_memory()}")
+
+
+def log_inputs(inputs):
+    for name, value in inputs.items():
+        if isinstance(value, torch.Tensor):
+            log(f"Input {name}: shape={tuple(value.shape)}, dtype={value.dtype}, device={value.device}")
 
 
 def save(path, value):
@@ -57,10 +97,11 @@ def decode(path):
 
 
 def load(repo, model_class, dtype=torch.float16):
-    processor = AutoProcessor.from_pretrained(repo, revision=REVISIONS[repo])
-    model = model_class.from_pretrained(
-        repo, revision=REVISIONS[repo], dtype=dtype,
-    ).to(DEVICE).eval()
+    with stage(f"loading {repo} revision={REVISIONS[repo]} dtype={dtype}"):
+        processor = AutoProcessor.from_pretrained(repo, revision=REVISIONS[repo])
+        model = model_class.from_pretrained(
+            repo, revision=REVISIONS[repo], dtype=dtype,
+        ).to(DEVICE).eval()
     return processor, model
 
 
@@ -72,10 +113,14 @@ def release():
 def diarize(audio):
     log("1/3 Detecting speakers across the complete recording...")
     processor, model = load(DIARIZER, AutoModelForAudioFrameClassification, torch.float32)
-    inputs = processor(audio, sampling_rate=SR, return_tensors="pt").to(DEVICE, torch.float32)
-    with torch.inference_mode():
+    with stage("diarization preprocessing and GPU transfer"):
+        inputs = processor(audio, sampling_rate=SR, return_tensors="pt").to(DEVICE, torch.float32)
+        log_inputs(inputs)
+    with stage("diarization model forward"), torch.inference_mode():
         output = model(**inputs)
-    segments = processor.extract_speaker_dict(output.logits, inputs.attention_mask, threshold=.5)[0]
+    with stage("diarization speaker extraction"):
+        log(f"Diarization logits: shape={tuple(output.logits.shape)}, dtype={output.logits.dtype}")
+        segments = processor.extract_speaker_dict(output.logits, inputs.attention_mask, threshold=.5)[0]
     duration = len(audio) / SR
     turns = [dict(start=max(0., float(s["Start"])), end=min(duration, float(s["End"])),
                   speaker=f'SPEAKER_{int(s["Speaker"]) + 1:02d}') for s in segments]
@@ -226,7 +271,10 @@ def main():
     parser = argparse.ArgumentParser(description="Local English transcription with anonymous speaker labels (AMD ROCm).")
     parser.add_argument("audio", type=Path)
     parser.add_argument("--out", type=Path, help="Output directory; defaults to <audio>.transcript")
+    parser.add_argument("--debug", action="store_true", help="Synchronize GPU at diagnostic stage boundaries")
     args = parser.parse_args()
+    global DEBUG
+    DEBUG = args.debug
     source = args.audio.expanduser().resolve(strict=True)
     if not torch.version.hip or not torch.cuda.is_available():
         raise RuntimeError("ROCm GPU unavailable. Check the AMD driver and gfx1151 PyTorch installation.")
@@ -234,19 +282,40 @@ def main():
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise FileExistsError(f"Output is not empty: {out}. Choose a fresh --out directory.")
     out.mkdir(parents=True, exist_ok=True)
-    audio = decode(source)
+    handler = logging.FileHandler(out / "run.log", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    LOGGER.addHandler(handler)
+    log(f"Python={sys.version.split()[0]}; "
+        f"PyTorch={torch.__version__}; HIP={torch.version.hip}; debug={DEBUG}")
+    import transformers
+    log(f"Transformers={transformers.__version__}; GPU={torch.cuda.get_device_properties(0)}")
+    log(f"GPU backend: benchmark={torch.backends.cudnn.benchmark}; deterministic={torch.backends.cudnn.deterministic}; "
+        f"miopen_immediate={torch.backends.miopen.immediate}")
+    log(f"Diagnostic environment: {dict((k, v) for k, v in os.environ.items() if k in ('MIOPEN_ENABLE_LOGGING', 'MIOPEN_ENABLE_LOGGING_CMD', 'MIOPEN_LOG_LEVEL', 'MIOPEN_FIND_MODE', 'HIP_LAUNCH_BLOCKING'))}")
+    log(f"Source={source}; file_bytes={source.stat().st_size}")
+    with stage("audio decoding"):
+        audio = decode(source)
+    log(f"Decoded audio: samples={len(audio)}, sample_rate={SR}, dtype={audio.dtype}, bytes={audio.nbytes}")
     log(f"Loaded {len(audio) / SR / 60:.1f} minutes. GPU: {torch.cuda.get_device_name(0)}")
-    turns = diarize(audio)
-    chunks = recognize(audio, out)
-    words = align(audio, chunks)
+    with stage("speaker detection"):
+        turns = diarize(audio)
+    with stage("word recognition"):
+        chunks = recognize(audio, out)
+    with stage("word alignment"):
+        words = align(audio, chunks)
     attribute(words, turns)
     export(out, words, turns, source)
     log(f"Saved transcript to {out.resolve()}")
 
 
 if __name__ == "__main__":
+    LOGGER.setLevel(logging.INFO)
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    LOGGER.addHandler(console)
+    LOGGER.propagate = False
     try:
         main()
     except (RuntimeError, ValueError, OSError) as error:
-        log(f"Error: {error}")
+        LOGGER.exception("Transcription failed: %s", error)
         raise SystemExit(1)

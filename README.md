@@ -31,8 +31,36 @@ The first run downloads model weights. Subsequent runs reuse the cache. The scri
 - `transcript.srt` — speaker-labelled subtitles.
 - `transcript.json` — word timestamps, speaker turns and overlap flags.
 - `raw_asr.json` — recognition text saved before alignment.
+- `run.log` — timestamped stages, timings, tensor shapes, GPU memory, software versions, and failure tracebacks.
 
 By default output goes next to the recording in `<filename>.transcript/`. Use a new output directory for a rerun; existing nonempty directories are protected.
+
+### Diagnosing GPU failures
+
+For a failure such as `miopenStatusUnknownError`, rerun with a fresh output directory and GPU synchronization at diagnostic stage boundaries:
+
+```bash
+uv run python transcribe.py CASE__Shine_PANEL.m4a --out panel-debug --debug
+```
+
+`run.log` records Python diagnostics. Native MIOpen messages go directly to the terminal; capture both streams when deeper diagnostics are needed:
+
+```bash
+set -o pipefail
+MIOPEN_ENABLE_LOGGING=1 MIOPEN_ENABLE_LOGGING_CMD=1 MIOPEN_LOG_LEVEL=6 \
+  uv run python transcribe.py CASE__Shine_PANEL.m4a --out panel-miopen --debug 2>&1 | tee panel-miopen.log
+```
+
+These settings follow [AMD's MIOpen logging documentation](https://rocm.docs.amd.com/projects/MIOpen/en/develop/reference/env_variables.html). Detailed logs can be large. Debug synchronization can slow execution.
+
+Recording duration affects decoded audio size and the whole-recording diarization input, but Nemotron internally processes chunks with a shared speaker cache. A convolution algorithm selection error alone does not establish that GPU memory ran out. Compare the failure stage, tensor shapes, and memory figures against a successful file. To isolate duration, create a short excerpt with FFmpeg and run it through the same pipeline:
+
+```bash
+ffmpeg -nostdin -i CASE__Shine_PANEL.m4a -t 300 -ac 1 -ar 16000 panel-first-5min.wav
+uv run python transcribe.py panel-first-5min.wav --out panel-short-debug --debug
+```
+
+This is a diagnostic comparison; splitting diarization into independent chunks would lose consistent speaker identities across the recording.
 
 Illustrative output:
 
@@ -51,7 +79,7 @@ Illustrative output:
 - The input is downmixed to mono. This is for a mixed meeting recording, not separately recorded participant channels.
 - Models run sequentially on the AMD GPU. Enrollment and pyannote dependencies have been removed.
 
-Diarization can still merge or split people; consistent labels are the model's objective, not a guarantee. No tests or hardware inference were run for this simplified prototype.
+Diarization can still merge or split people; consistent labels are the model's objective, not a guarantee. Diagnostic logging has been checked locally; GPU inference has not been validated in the development environment.
 
 ## Setup references
 
