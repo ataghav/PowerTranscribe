@@ -135,24 +135,40 @@ def recognize(audio, out):
     processor, model = load(ASR, AutoModelForMultimodalLM)
     duration = len(audio) / SR
     chunks = []
-    count = math.ceil(duration / 40)
-    for i in range(count):
-        core_start, core_end = i * 40., min(duration, (i + 1) * 40.)
+
+    def recognize_range(core_start, core_end):
         start, end = max(0., core_start - 1.), min(duration, core_end + 1.)
         clip = audio[round(start * SR):round(end * SR)]
-        log(f"2/3 Recognizing words: {i + 1}/{count}")
         text = ""
         if np.max(np.abs(clip)) > 1e-5:
             inputs = processor.apply_transcription_request(audio=clip, language="English").to(DEVICE, torch.float16)
-            with torch.inference_mode():
+            with torch.inference_mode(), torch.backends.miopen.flags(immediate=True):
                 output = model.generate(**inputs, max_new_tokens=2048, do_sample=False, num_beams=1)
             ids = output[:, inputs["input_ids"].shape[1]:]
-            if ids.shape[1] >= 2048:
-                raise RuntimeError("Recognizer reached its token limit; refusing a truncated transcript.")
-            text = processor.decode(ids, return_format="transcription_only")[0].strip()
+            reached_limit = ids.shape[1] >= 2048
+            if not reached_limit:
+                text = processor.decode(ids, return_format="transcription_only")[0].strip()
             del inputs, output, ids
+            if reached_limit:
+                if core_end - core_start <= 10:
+                    raise RuntimeError(
+                        f"Recognizer reached its token limit at {core_start:.1f}–{core_end:.1f}s "
+                        "even with a short chunk; refusing a truncated transcript. "
+                        "Completed chunks are retained in raw_asr.json."
+                    )
+                midpoint = (core_start + core_end) / 2
+                log(f"Recognizer reached its token limit at {core_start:.1f}–{core_end:.1f}s; "
+                    "retrying as two shorter chunks.")
+                recognize_range(core_start, midpoint)
+                recognize_range(midpoint, core_end)
+                return
         chunks.append(dict(start=start, end=end, core_start=core_start, core_end=core_end, text=text))
         save(out / "raw_asr.json", chunks)
+
+    count = math.ceil(duration / 40)
+    for i in range(count):
+        log(f"2/3 Recognizing words: {i + 1}/{count}")
+        recognize_range(i * 40., min(duration, (i + 1) * 40.))
     del model, processor
     release()
     return chunks
@@ -170,7 +186,7 @@ def align(audio, chunks):
             audio=clip, transcript=chunk["text"], language="English",
         )
         inputs = inputs.to(DEVICE, torch.float16)
-        with torch.inference_mode():
+        with torch.inference_mode(), torch.backends.miopen.flags(immediate=True):
             output = model(**inputs)
         aligned = processor.decode_forced_alignment(
             logits=output.logits, input_ids=inputs["input_ids"], word_lists=word_lists,
@@ -290,7 +306,7 @@ def main():
         f"PyTorch={torch.__version__}; HIP={torch.version.hip}; debug={DEBUG}")
     import transformers
     log(f"Transformers={transformers.__version__}; GPU={torch.cuda.get_device_properties(0)}")
-    log(f"GPU backend: benchmark={torch.backends.cudnn.benchmark}; deterministic={torch.backends.cudnn.deterministic}; "
+    log(f"GPU backend defaults: benchmark={torch.backends.cudnn.benchmark}; deterministic={torch.backends.cudnn.deterministic}; "
         f"miopen_immediate={torch.backends.miopen.immediate}")
     log(f"Diagnostic environment: {dict((k, v) for k, v in os.environ.items() if k in ('MIOPEN_ENABLE_LOGGING', 'MIOPEN_ENABLE_LOGGING_CMD', 'MIOPEN_LOG_LEVEL', 'MIOPEN_FIND_MODE', 'HIP_LAUNCH_BLOCKING'))}")
     log(f"Source={source}; file_bytes={source.stat().st_size}")

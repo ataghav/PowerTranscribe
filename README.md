@@ -53,7 +53,7 @@ MIOPEN_ENABLE_LOGGING=1 MIOPEN_ENABLE_LOGGING_CMD=1 MIOPEN_LOG_LEVEL=6 \
 
 These settings follow [AMD's MIOpen logging documentation](https://rocm.docs.amd.com/projects/MIOpen/en/develop/reference/env_variables.html). Detailed logs can be large. Debug synchronization can slow execution.
 
-Diarization inference uses PyTorch's built-in [MIOpen immediate mode](https://docs.pytorch.org/docs/2.14/backends.html#torch.backends.miopen.immediate). On the Radeon 8060S, the default solver search failed with `Invalid elapsed time` and `miopenStatusUnknownError` for an upsampler input of shape `(1, 192, 486)`. Immediate mode passed the same convolution against a CPU reference. The setting is scoped to diarization; the previous backend setting is restored afterward.
+Model inference uses PyTorch's built-in [MIOpen immediate mode](https://docs.pytorch.org/docs/2.14/backends.html#torch.backends.miopen.immediate). On the Radeon 8060S, the default solver search failed with `Invalid elapsed time` and `miopenStatusUnknownError` for an upsampler input of shape `(1, 192, 486)`, and in the Qwen audio encoders for the final recording chunk. Immediate mode passed the upsampler convolution against a CPU reference and recovered recognition and alignment of the final chunk. The setting is scoped to inference calls; the previous backend setting is restored afterward.
 
 Recording duration affects decoded audio size and the whole-recording diarization input, but Nemotron internally processes chunks with a shared speaker cache. A convolution algorithm selection error alone does not establish that GPU memory ran out. Compare the failure stage, tensor shapes, and memory figures against a successful file. To isolate duration, create a short excerpt with FFmpeg and run it through the same pipeline:
 
@@ -75,13 +75,13 @@ Illustrative output:
 ## Fixed choices
 
 - Diarization runs across the whole file, preserving the model's speaker state. Speaker IDs do not restart at each recognition chunk.
-- Recognition uses 40-second cores with one second of context; alignment restores original timestamps before assigning speakers.
+- Recognition uses 40-second cores with one second of context. If a chunk reaches the 2,048-token limit, it is split in half and retried, down to 10-second cores. A chunk that still reaches the limit fails explicitly; truncated output is never accepted. Alignment restores original timestamps before assigning speakers.
 - Up to **eight distinct speakers per recording**. Labels are local to that recording; `SPEAKER_01` in another file can be a different person.
 - Overlapping speech and uncertain boundaries receive explicit labels. The prototype does not recover two complete word streams from simultaneous speech.
 - The input is downmixed to mono. This is for a mixed meeting recording, not separately recorded participant channels.
 - Models run sequentially on the AMD GPU. Enrollment and pyannote dependencies have been removed.
 
-Diarization can still merge or split people; consistent labels are the model's objective, not a guarantee. On the Radeon 8060S, validation covered diagnostic logging, the failing convolution against a CPU reference, and complete diarization of the 76.4-minute panel recording (837 turns, six speaker labels). Full transcription quality has not been evaluated.
+Diarization can still merge or split people; consistent labels are the model's objective, not a guarantee. On the Radeon 8060S, validation covered diagnostic logging, the failing convolution against a CPU reference, and complete diarization of the 76.4-minute panel recording (837 turns, six speaker labels). Recognition recovered a token-limit repetition loop by splitting its chunk; retained recognition plus the recovered final chunk then passed full alignment and export (116 chunks, 5,901 words). Transcription quality has not been evaluated.
 
 ## Setup references
 
