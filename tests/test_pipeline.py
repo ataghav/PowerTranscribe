@@ -1,4 +1,6 @@
 import dataclasses
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -101,7 +103,7 @@ class PipelineTests(unittest.TestCase):
         store.add('turns', [dict(start=0., end=2., speaker='SPEAKER_01')])
         store.add('words', [dict(start=0., end=0.5, text=text) for text in ('Hello', 'world')])
         resources = Mock()
-        transcribe.export(self.directory, store, Path('source.wav'), self.config, resources)
+        transcribe.export(self.directory, store, Path('source.wav'), resources)
         result = json.loads((self.directory/'transcript.json').read_text())
         self.assertEqual([w['text'] for w in result['words']], ['Hello', 'world'])
         self.assertTrue(all(w['speaker'] == 'SPEAKER_01' for w in result['words']))
@@ -136,7 +138,78 @@ class PipelineTests(unittest.TestCase):
         path.write_text('keep this file')
         with self.assertRaisesRegex(ValueError, 'not a directory'):
             transcribe.select_output_directory(path, reserve=True)
+        with self.assertRaisesRegex(ValueError, 'parent is not a directory'):
+            transcribe.select_output_directory(path/'nested', reserve=True)
+        with self.assertRaisesRegex(ValueError, 'filesystem root'):
+            transcribe.select_output_directory(Path(self.directory.anchor), reserve=True)
         self.assertEqual(path.read_text(), 'keep this file')
+
+    def test_rerun_does_not_loop_if_a_parent_becomes_a_file(self):
+        parent = self.directory/'colliding-parent'
+
+        def collision(**kwargs):
+            parent.write_text('created concurrently')
+            raise FileExistsError('parent collision')
+
+        with patch.object(Path, 'mkdir', side_effect=collision) as mkdir:
+            with self.assertRaises(FileExistsError):
+                transcribe.select_output_directory(parent/'run', reserve=True)
+        self.assertEqual(mkdir.call_count, 1)
+
+    def test_same_speaker_merges_across_long_gaps_but_not_other_speakers(self):
+        store = Checkpoints(self.directory/'checkpoints.sqlite3', self.config)
+        self.addCleanup(store.close)
+        store.add('turns', [dict(start=0., end=101., speaker='SPEAKER_01'),
+                            dict(start=102., end=103., speaker='SPEAKER_02'),
+                            dict(start=104., end=105., speaker='SPEAKER_01')])
+        store.add('words', [dict(start=0., end=1., text='Hello'),
+                            dict(start=100., end=101., text='later'),
+                            dict(start=102., end=103., text='Other'),
+                            dict(start=104., end=105., text='Again')])
+        with redirect_stdout(io.StringIO()):
+            transcribe.export(self.directory, store, Path('source.wav'), Mock())
+        segments = json.loads((self.directory/'transcript.json').read_text())['segments']
+        self.assertEqual([s['text'] for s in segments], ['Hello later', 'Other', 'Again'])
+        self.assertEqual((segments[0]['start'], segments[0]['end']), (0., 101.))
+        self.assertEqual([s['speaker'] for s in segments], ['SPEAKER_01', 'SPEAKER_02', 'SPEAKER_01'])
+
+    def test_plain_output_option_keeps_structured_times_and_exports_repeatably(self):
+        store = Checkpoints(self.directory/'checkpoints.sqlite3', self.config)
+        self.addCleanup(store.close)
+        store.add('turns', [dict(start=0., end=3., speaker='SPEAKER_01')])
+        pieces = ['She said "hi"', 'back\\slash', 'café 🙂']
+        store.add('words', [dict(start=float(i), end=i+.5, text=text) for i, text in enumerate(pieces)])
+        terminal = io.StringIO()
+        with redirect_stdout(terminal):
+            transcribe.export(self.directory, store, Path('source.wav'), Mock(), include_timestamps=False)
+        expected = 'SPEAKER_01: '+' '.join(pieces)+'\n'
+        self.assertEqual((self.directory/'transcript.txt').read_text(), expected)
+        self.assertEqual(terminal.getvalue(), expected)
+        result = json.loads((self.directory/'transcript.json').read_text())
+        self.assertEqual(result['segments'][0]['text'], ' '.join(pieces))
+        self.assertEqual((result['segments'][0]['start'], result['segments'][0]['end']), (0., 2.5))
+        self.assertIn('00:00:00,000 --> 00:00:02,500', (self.directory/'transcript.srt').read_text())
+        with redirect_stdout(io.StringIO()):
+            transcribe.export(self.directory, store, Path('source.wav'), Mock())
+        self.assertEqual(store.count('segments'), 1)
+        self.assertTrue((self.directory/'transcript.txt').read_text().startswith('[00:00:00.000–00:00:02.500]'))
+
+    def test_project_input_and_output_paths(self):
+        input_dir, output_dir = self.directory/'input', self.directory/'output'
+        input_dir.mkdir()
+        source = input_dir/'meeting.m4a'
+        source.write_bytes(b'recording')
+        with patch.object(transcribe, 'PROJECT_DIR', self.directory), \
+                patch.object(transcribe, 'INPUT_DIR', input_dir), patch.object(transcribe, 'OUTPUT_DIR', output_dir):
+            self.assertEqual(transcribe.resolve_audio_path(Path('meeting.m4a')), source)
+            self.assertEqual(transcribe.resolve_audio_path(Path('input/meeting.m4a')), source)
+            self.assertEqual(transcribe.requested_output_path(None, source), output_dir/'meeting.transcript')
+            self.assertEqual(transcribe.requested_output_path(Path('custom'), source), output_dir/'custom')
+            self.assertEqual(transcribe.requested_output_path(Path('output/custom'), source), output_dir/'custom')
+            self.assertEqual(transcribe.requested_output_path(Path('.'), source), output_dir/'meeting.transcript')
+            with self.assertRaisesRegex(ValueError, 'stay inside output'):
+                transcribe.requested_output_path(Path('../outside'), source)
+            self.assertEqual(transcribe.requested_output_path(self.directory/'external', source), self.directory/'external')
 
     def test_attribution_sweep_retains_future_turns_for_nested_words(self):
         turns = [dict(start=0., end=.5, speaker='SPEAKER_01'),
@@ -150,7 +223,7 @@ class PipelineTests(unittest.TestCase):
         self.addCleanup(store.close)
         store.add('turns', turns)
         store.add('words', words)
-        transcribe.export(self.directory, store, Path('source.wav'), self.config, Mock())
+        transcribe.export(self.directory, store, Path('source.wav'), Mock())
         actual = json.loads((self.directory/'transcript.json').read_text())['words']
         self.assertEqual(actual, expected)
 

@@ -105,8 +105,9 @@ class Checkpoints:
             CREATE TABLE chunks (id INTEGER PRIMARY KEY, start REAL, end REAL, data TEXT NOT NULL);
             CREATE TABLE turns (id INTEGER PRIMARY KEY, start REAL, end REAL, data TEXT NOT NULL);
             CREATE INDEX turns_order ON turns(start, end, id);
-            CREATE TABLE words (id INTEGER PRIMARY KEY, start REAL, end REAL, data TEXT NOT NULL);
+            CREATE TABLE words (id INTEGER PRIMARY KEY, start REAL, end REAL, data TEXT NOT NULL, segment_id INTEGER);
             CREATE INDEX words_order ON words(start, end, id);
+            CREATE INDEX words_segment ON words(segment_id, start, end, id);
             CREATE TABLE segments (id INTEGER PRIMARY KEY, start REAL, end REAL, data TEXT NOT NULL);
         ''')
 
@@ -130,10 +131,35 @@ class Checkpoints:
         for identity, data in self.connection.execute('SELECT id, data FROM words ORDER BY start, end, id'):
             yield identity, json.loads(data)
 
-    def update_word(self, identity, word):
-        self.connection.execute('UPDATE words SET data=? WHERE id=?',
-                                (json.dumps(word, ensure_ascii=False, allow_nan=False), identity))
+    def update_word(self, identity, word, segment_id):
+        self.connection.execute('UPDATE words SET data=?, segment_id=? WHERE id=?',
+                                (json.dumps(word, ensure_ascii=False, allow_nan=False), segment_id, identity))
         self.connection.commit()
+
+    def prepare_export(self):
+        self.connection.execute('DELETE FROM segments')
+        self.connection.execute('UPDATE words SET segment_id=NULL WHERE segment_id IS NOT NULL')
+        self.connection.commit()
+
+    def start_segment(self, segment):
+        cursor = self.connection.execute('INSERT INTO segments(start,end,data) VALUES (?,?,?)',
+                                         (segment['start'], segment['end'], json.dumps(segment)))
+        self.connection.commit()
+        return cursor.lastrowid
+
+    def finish_segment(self, identity, segment):
+        self.connection.execute('UPDATE segments SET end=?, data=? WHERE id=?',
+                                (segment['end'], json.dumps(segment), identity))
+        self.connection.commit()
+
+    def segments_with_ids(self):
+        for identity, data in self.connection.execute('SELECT id, data FROM segments ORDER BY id'):
+            yield identity, json.loads(data)
+
+    def segment_words(self, identity):
+        for (data,) in self.connection.execute(
+                'SELECT data FROM words WHERE segment_id=? ORDER BY start,end,id', (identity,)):
+            yield json.loads(data)
 
     def count(self, table):
         if table not in ('chunks', 'turns', 'words', 'segments'):

@@ -29,6 +29,9 @@ ASR = "Qwen/Qwen3-ASR-1.7B-hf"
 ALIGNER = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
 DIARIZER = "nvidia/Nemotron-3-Diarization"
 LOGGER = logging.getLogger("transcribe")
+PROJECT_DIR = Path(__file__).resolve().parent
+INPUT_DIR = PROJECT_DIR/'input'
+OUTPUT_DIR = PROJECT_DIR/'output'
 DEBUG = False
 MONITOR = None
 REVISIONS = {
@@ -298,8 +301,9 @@ def timestamp(seconds, srt=False):
     return f'{hours:02}:{minutes:02}:{seconds:02}{"," if srt else "."}{milliseconds:03}'
 
 
-def export(out, store, source, config, resources):
-    segment = None
+def export(out, store, source, resources, include_timestamps=True):
+    store.prepare_export()
+    segment, segment_id = None, None
     turns = iter(store.rows('turns'))
     upcoming = next(turns, None)
     active = []
@@ -313,34 +317,56 @@ def export(out, store, source, config, resources):
             upcoming = next(turns, None)
         # Sweep both ordered streams once; retained turns span at most one word's look-ahead.
         attribute([word], [turn for turn in active if turn['start'] < end])
-        if (segment and segment['speaker'] == word['speaker']
-                and word['start']-segment['end'] < config.max_segment_gap_seconds
-                and word['end']-segment['start'] <= config.max_segment_seconds):
-            segment['text'] += ' '+word['text']
+        if segment and segment['speaker'] == word['speaker']:
             segment['end'] = max(segment['end'], word['end'])
         else:
-            if segment:
-                store.add('segments', [segment])
-            segment = {key: word[key] for key in ('start', 'end', 'text', 'speaker')}
-        store.update_word(identity, word)
-    if segment:
-        store.add('segments', [segment])
+            if segment is not None:
+                store.finish_segment(segment_id, segment)
+            segment = {key: word[key] for key in ('start', 'end', 'speaker')}
+            segment_id = store.start_segment(segment)
+        store.update_word(identity, word, segment_id)
+    if segment is not None:
+        store.finish_segment(segment_id, segment)
     with (out/'transcript.txt.part').open('w', encoding='utf-8') as text_file, \
             (out/'transcript.srt.part').open('w', encoding='utf-8') as srt_file:
-        for i, segment in enumerate(store.rows('segments'), 1):
-            content = f'{segment["speaker"]}: {segment["text"]}'
-            line = f'[{timestamp(segment["start"])}–{timestamp(segment["end"])}] {content}\n'
-            subtitle = (f'{i}\n{timestamp(segment["start"], True)} --> '
-                        f'{timestamp(max(segment["end"], segment["start"]+.05), True)}\n{content}\n\n')
-            resources.check_disk(len(line.encode('utf-8'))+len(subtitle.encode('utf-8')))
-            text_file.write(line)
-            srt_file.write(subtitle)
-            print(line, end='')
+        for i, (identity, segment) in enumerate(store.segments_with_ids(), 1):
+            prefix = (f'[{timestamp(segment["start"])}–{timestamp(segment["end"])}] '
+                      if include_timestamps else '') + segment['speaker']+': '
+            text_file.write(prefix)
+            print(prefix, end='')
+            srt_file.write(f'{i}\n{timestamp(segment["start"], True)} --> '
+                           f'{timestamp(max(segment["end"], segment["start"]+.05), True)}\n'
+                           f'{segment["speaker"]}: ')
+            first = True
+            for word in store.segment_words(identity):
+                fragment = ('' if first else ' ')+word['text']
+                resources.check_disk(len(fragment.encode('utf-8'))*2)
+                text_file.write(fragment)
+                srt_file.write(fragment)
+                print(fragment, end='')
+                first = False
+            text_file.write('\n')
+            srt_file.write('\n\n')
+            print()
     with (out/'transcript.json.part').open('w', encoding='utf-8') as file:
         file.write('{"source":'+json.dumps(str(source))+',"models":'+json.dumps(REVISIONS))
-        for key, table in [('words', 'words'), ('segments', 'segments'), ('diarization', 'turns')]:
-            file.write(','+json.dumps(key)+':')
-            write_json_array(file, store.rows(table), resources)
+        file.write(',"words":')
+        write_json_array(file, store.rows('words'), resources)
+        file.write(',"segments":[')
+        first_segment = True
+        for identity, segment in store.segments_with_ids():
+            file.write(('' if first_segment else ',')+json.dumps(segment)[:-1]+',"text":"')
+            first_word = True
+            for word in store.segment_words(identity):
+                fragment = ('' if first_word else ' ')+json.dumps(word['text'], ensure_ascii=False)[1:-1]
+                file.flush()
+                resources.check_disk(len(fragment.encode('utf-8')))
+                file.write(fragment)
+                first_word = False
+            file.write('"}')
+            first_segment = False
+        file.write('],"diarization":')
+        write_json_array(file, store.rows('turns'), resources)
         file.write('}')
     for name in ('transcript.txt', 'transcript.srt', 'transcript.json'):
         (out/(name+'.part')).replace(out/name)
@@ -348,8 +374,15 @@ def export(out, store, source, config, resources):
 
 def select_output_directory(requested, reserve=False):
     """Use a fresh sibling for reruns; mkdir reserves it atomically."""
+    if not requested.name:
+        raise ValueError('Output must name a run directory, not a filesystem root')
     if requested.exists() and not requested.is_dir():
         raise ValueError(f'Output path is not a directory: {requested}')
+    parent = requested.parent
+    while not parent.exists():
+        parent = parent.parent
+    if not parent.is_dir():
+        raise ValueError(f'Output parent is not a directory: {parent}')
     number = 1
     while True:
         if number == 1:
@@ -363,16 +396,47 @@ def select_output_directory(requested, reserve=False):
                 candidate.mkdir(parents=True, exist_ok=False)
                 return candidate
             except FileExistsError:
-                pass
+                if not (candidate.exists() or candidate.is_symlink()):
+                    raise  # A parent collided; trying more sibling names cannot resolve it.
         elif not candidate.exists():
             return candidate
         number += 1
 
 
+def resolve_audio_path(path):
+    path = path.expanduser()
+    if path.is_absolute():
+        candidates = [path]
+    elif path.parent == Path('.'):
+        candidates = [INPUT_DIR/path, path]
+    else:
+        candidates = [path, PROJECT_DIR/path]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve(strict=True)
+    raise FileNotFoundError(f'Audio file not found: {path}. Put recordings in {INPUT_DIR} or pass an explicit path.')
+
+
+def requested_output_path(option, source):
+    if option is None:
+        return OUTPUT_DIR/(source.stem+'.transcript')
+    option = option.expanduser()
+    if option.is_absolute():
+        candidate = option.resolve()
+    elif len(option.parts) > 1 and option.parts[0] == 'output':
+        candidate = (PROJECT_DIR/option).resolve()
+    else:
+        candidate = (OUTPUT_DIR/option).resolve()
+    if not option.is_absolute() and not candidate.is_relative_to(OUTPUT_DIR.resolve()):
+        raise ValueError('Relative --out paths must stay inside output/; use an absolute path for another location')
+    return OUTPUT_DIR/(source.stem+'.transcript') if candidate == OUTPUT_DIR.resolve() else candidate
+
+
 def main():
     parser = argparse.ArgumentParser(description='Bounded-memory English transcription with anonymous speakers (AMD ROCm).')
     parser.add_argument('audio', type=Path)
-    parser.add_argument('--out', type=Path, help='Output directory; defaults to <audio>.transcript')
+    parser.add_argument('--out', type=Path, help='Run directory under output/; absolute paths override this location')
+    parser.add_argument('--no-timestamps', action='store_true', help='Omit time ranges from TXT and terminal output')
     parser.add_argument('--config', type=Path, default=Path(__file__).with_name('transcribe.toml'))
     parser.add_argument('--check', action='store_true', help='Validate configuration and available resources without decoding or loading models')
     parser.add_argument('--debug', action='store_true', help='Synchronize GPU at diagnostic stage boundaries')
@@ -381,10 +445,10 @@ def main():
     DEBUG = args.debug
     try:
         config = Settings.read(args.config)
-        source = args.audio.expanduser().resolve(strict=True)
+        source = resolve_audio_path(args.audio)
+        requested_out = requested_output_path(args.out, source)
     except (ValueError, OSError) as error:
         parser.error(str(error))
-    requested_out = (args.out or source.with_suffix('.transcript')).expanduser().resolve()
     try:
         out = select_output_directory(requested_out)
         duration = probe_duration(source, config)
@@ -396,6 +460,7 @@ def main():
     log(f'Preflight passed: {preflight}')
     log('RAM budget is monitored, not an OS reservation; GPU budget caps the PyTorch allocator, not driver allocations.')
     if args.check:
+        log(f'Output directory for next run: {out}')
         log(resources.describe())
         return
     out = select_output_directory(requested_out, reserve=True)
@@ -406,7 +471,7 @@ def main():
     handler = logging.FileHandler(out/'run.log', encoding='utf-8')
     handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
     LOGGER.addHandler(handler)
-    save(out/'effective_config.json', vars(config))
+    save(out/'effective_config.json', dict(vars(config), include_timestamps=not args.no_timestamps))
     import transformers
     log(f'Python={sys.version.split()[0]}; PyTorch={torch.__version__}; HIP={torch.version.hip}; '
         f'Transformers={transformers.__version__}; GPU={torch.cuda.get_device_properties(0)}')
@@ -427,7 +492,7 @@ def main():
         with stage('word alignment'):
             align(audio, store, config, resources)
         with stage('speaker attribution and export'):
-            export(out, store, source, config, resources)
+            export(out, store, source, resources, include_timestamps=not args.no_timestamps)
         completed = True
         log(f'Saved transcript to {out}; {resources.describe()}')
     except torch.OutOfMemoryError as error:

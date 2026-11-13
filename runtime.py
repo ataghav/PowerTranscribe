@@ -40,8 +40,6 @@ class Settings:
     miopen_immediate: bool
     diarization_mode: str
     speaker_threshold: float
-    max_segment_seconds: float
-    max_segment_gap_seconds: float
 
     @classmethod
     def read(cls, path):
@@ -60,7 +58,7 @@ class Settings:
             if field.type is int and value > sys.maxsize:
                 raise ValueError(f"Config {field.name}: exceeds the platform integer limit")
             zero_allowed = field.name in ('context_seconds', 'silence_rms', 'min_free_ram_gib',
-                                           'min_free_gpu_gib', 'min_free_disk_gib', 'max_segment_gap_seconds')
+                                           'min_free_gpu_gib', 'min_free_disk_gib')
             if field.type in (int, float) and (value < 0 or value == 0 and not zero_allowed):
                 condition = 'nonnegative' if zero_allowed else 'positive'
                 raise ValueError(f"Config {field.name}: must be {condition}, got {value}")
@@ -74,8 +72,6 @@ class Settings:
             raise ValueError("Config max_chunk_seconds + 2 * context_seconds exceeds Qwen's 180-second alignment limit")
         if settings.min_chunk_seconds < 0.5:
             raise ValueError("Config min_chunk_seconds must be >= Qwen's 0.5-second minimum input duration")
-        if settings.max_segment_seconds > settings.max_chunk_seconds:
-            raise ValueError('Config max_segment_seconds must not exceed max_chunk_seconds')
         if settings.probe_timeout_seconds > (2**31-1)//1000:
             raise ValueError('Config probe_timeout_seconds exceeds the subprocess poll timeout range')
         if settings.silence_rms > 1 or settings.speaker_threshold >= 1:

@@ -23,5 +23,3 @@ max_new_tokens = 2048
 miopen_immediate = true
 diarization_mode = "low_latency"
 speaker_threshold = 0.5
-max_segment_seconds = 12.0
-max_segment_gap_seconds = 0.8

@@ -11,6 +11,8 @@ uv sync
 uv run python transcribe.py meeting.m4a
 ```
 
+Put recordings in `input/`. A bare filename is resolved there; explicit audio paths are also accepted. Results default to `output/<recording>.transcript/`. Relative `--out` names are placed under `output/`; absolute paths explicitly select another location. The input and output folders are ignored by Git except for their `.gitkeep` placeholders.
+
 The pinned models download to the Hugging Face cache on first use. This needs additional disk space beyond the per-job working directory.
 
 Validate configuration, audio metadata, and available resources before decoding or loading model weights:
@@ -19,10 +21,13 @@ Validate configuration, audio metadata, and available resources before decoding 
 uv run python transcribe.py meeting.m4a --check
 ```
 
-Choose a configuration and a fresh output directory:
+Choose a configuration and a run name:
 
 ```bash
 uv run python transcribe.py meeting.m4a --config transcribe.toml --out result.transcript --debug
+
+# Omit leading time ranges from the TXT file and terminal output:
+uv run python transcribe.py meeting.m4a --out plain.transcript --no-timestamps
 ```
 
 Existing output directories are preserved. Repeating the same command automatically selects a fresh numbered sibling, such as `result-2.transcript/`, and prints the selected directory. `--debug` adds GPU synchronization at stage boundaries. Use `--help` for the CLI options.
@@ -64,12 +69,16 @@ If the model nevertheless reaches the generation limit, the core is split and re
 
 ## Outputs and memory measurements
 
+Consecutive words with the same speaker label are combined until that label changes, including across pauses and recognition chunks. The merged range starts at the first word and ends at the latest word end. The old `max_segment_seconds` and `max_segment_gap_seconds` settings have been removed. Segment text is streamed from its member words in SQLite, so an uninterrupted speaker does not require a recording-sized string in RAM.
+
+`--no-timestamps` controls leading ranges in TXT/terminal output. JSON retains word/segment timing, and SRT retains the timing required for subtitles. SRT cues follow the same speaker-turn grouping, so a long uninterrupted speaker produces a long cue.
+
 The output directory contains:
 
 - `transcript.txt`, `transcript.srt`, `transcript.json` — final timestamped transcript and speaker labels.
 - `raw_asr.json` — streamed recognition export, also attempted on failure.
 - `checkpoints.sqlite3` — durable completed intermediate results. Automatic resume is not implemented.
-- `effective_config.json` — settings used for this run.
+- `effective_config.json` — settings and timestamp-display option used for this run.
 - `run.log` — progress, stage timings, process RAM/GPU snapshots, and failure traceback.
 - `resource_usage.json` — final current/peak process RAM, child-process RAM peak, GPU allocated/reserved peaks, host/GPU availability, and a `completed` flag.
 
@@ -79,7 +88,7 @@ RAM measurements are Linux process RSS/high-water values; child-process peaks ma
 
 Measured on a 90-second excerpt containing the previously failing interval: direct-to-GPU model loading reduced peak process RAM from **10.35 to 6.36 GiB**; peak GPU tensor allocation was **4.18 GiB**, with **4.55 GiB** peak allocator reservation. These are measured examples, not universal per-file requirements. Streaming diarization used approximately **0.46 GiB** peak GPU tensor allocation.
 
-The full 76.4-minute panel recording completed with 122 continuous, silence-aware cores, no generation-limit retry, and 5,909 aligned words. Peak process RAM was **6.34 GiB**; peak GPU allocation/reservation was **4.18 / 4.81 GiB**. Native low-latency streaming trades throughput for bounded state: speaker detection took about 293 seconds, compared with about 11 seconds for the earlier whole-recording GPU forward. Recognition took about 288 seconds. Transcript accuracy was not manually scored.
+The full 76.4-minute panel recording completed with 122 continuous, silence-aware cores, no generation-limit retry, and 5,909 aligned words (676 segments under the earlier time-limited formatting). Peak process RAM was **6.34 GiB**; peak GPU allocation/reservation was **4.18 / 4.81 GiB**. Native low-latency streaming trades throughput for bounded state: speaker detection took about 293 seconds, compared with about 11 seconds for the earlier whole-recording GPU forward. Recognition took about 288 seconds. Transcript accuracy was not manually scored.
 
 ## Diagnosis and validation
 
