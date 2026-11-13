@@ -1,93 +1,110 @@
 # Meeting transcriber
 
-A deliberately small terminal prototype for **English audio on Linux / Ryzen AI Max+ 395 / Radeon 8060S**. It uses Qwen3-ASR 1.7B for words, Qwen3 ForcedAligner for timestamps, and Nemotron 3 for anonymous speaker labels. No enrollment, voice profiles, cloud transcription, or model-selection menu.
+Local English transcription on Linux / WSL2 / AMD Radeon 8060S (`gfx1151`). Qwen3-ASR supplies words, Qwen3 ForcedAligner supplies timestamps, and Nemotron 3 supplies anonymous speaker labels. Models run sequentially on the GPU; there is no CPU inference fallback.
 
-## Install
+## Install and run
 
-Prerequisites: `uv`, `ffmpeg`, and a working ROCm 10.1-compatible host kernel/driver. This project installs AMD's gfx1151 PyTorch wheels; it does not install your system driver.
+Install `uv`, `ffmpeg` (including `ffprobe`), and a compatible AMD ROCm host driver, then:
 
 ```bash
-cd meeting-transcriber
 uv sync
+uv run python transcribe.py meeting.m4a
 ```
 
-`uv` selects Python 3.12, creates the project-local `.venv`, and writes `uv.lock`. Keep the generated lockfile. No manual activation is needed. On Ubuntu, install FFmpeg with `sudo apt install ffmpeg` if missing. Install uv using its [official instructions](https://docs.astral.sh/uv/getting-started/installation/).
+The pinned models download to the Hugging Face cache on first use. This needs additional disk space beyond the per-job working directory.
 
-## Run
+Validate configuration, audio metadata, and available resources before decoding or loading model weights:
 
 ```bash
-uv run python transcribe.py /path/to/meeting.mp3
+uv run python transcribe.py meeting.m4a --check
 ```
 
-Or choose an output directory:
+Choose a configuration and a fresh output directory:
 
 ```bash
-uv run python transcribe.py meeting.wav --out result
+uv run python transcribe.py meeting.m4a --config transcribe.toml --out result.transcript --debug
 ```
 
-The first run downloads model weights. Subsequent runs reuse the cache. The script prints progress and the final transcript, and writes:
+Existing nonempty output directories are protected. `--debug` adds GPU synchronization at stage boundaries. Use `--help` for the CLI options.
 
-- `transcript.txt` — readable timestamped speaker turns.
-- `transcript.srt` — speaker-labelled subtitles.
-- `transcript.json` — word timestamps, speaker turns and overlap flags.
-- `raw_asr.json` — recognition text saved before alignment.
-- `run.log` — timestamped stages, timings, tensor shapes, GPU memory, software versions, and failure tracebacks.
+## Limits and resource validation
 
-By default output goes next to the recording in `<filename>.transcript/`. Use a new output directory for a rerun; existing nonempty directories are protected.
+All operational budgets and chunking settings are in [transcribe.toml](transcribe.toml). The file is required, and unknown keys, missing keys, wrong types, nonfinite numbers, and inconsistent bounds are rejected. The default file sits beside the script, independent of the current working directory.
 
-### Diagnosing GPU failures
+| Setting | Default | Meaning |
+| --- | ---: | --- |
+| `ram_budget_gib` | 12 | Monitored process resident-memory ceiling, including model loading |
+| `gpu_budget_gib` | 8 | PyTorch GPU allocator ceiling |
+| `min_free_ram_gib` / `min_free_gpu_gib` | 2 / 1 | Startup headroom; host RAM headroom is also checked during processing |
+| `working_disk_gib` | 16 | Decoded PCM, SQLite checkpoints, logs, and exports in the output directory |
+| `min_free_disk_gib` | 2 | Disk headroom checked before writing and between processing steps |
+| `cpu_threads` | 4 | PyTorch and FFmpeg worker-thread setting |
+| `io_buffer_mib` / `sqlite_cache_mib` | 1 / 8 | Bounded decoder I/O and SQLite page cache |
+| `max_chunk_seconds` | 40 | Hard maximum ASR core duration; context is added separately |
+| `context_seconds` | 1 | ASR/alignment context on each side; maximum model input is therefore 42 seconds by default |
+| `silence_search_seconds` / `silence_window_seconds` | 5 / 0.3 | Search backward near the core limit for the last quiet window |
+| `silence_rms` | 0.001 | Quiet-window RMS threshold; without silence, use the lowest-energy window |
+| `min_chunk_seconds` / `max_new_tokens` | 10 / 2048 | Stop retrying token-limited cores at this duration; never accept truncated output |
+| `diarization_mode` | `low_latency` | NVIDIA's supported streaming preset; alternatives are validated by name |
+| `miopen_immediate` | `true` | Native PyTorch/MIOpen convolution selection mode during inference |
 
-For a failure such as `miopenStatusUnknownError`, rerun with a fresh output directory and GPU synchronization at diagnostic stage boundaries:
+Startup checks compare budgets plus headroom against host/WSL RAM (including cgroup v2 limits when present), GPU free memory, and free working-disk space. They also check model input/context limits, a conservative model-memory envelope, CPU count, and estimated disk requirements from the recording duration. Error messages name the offending setting and the required/available capacity. Unknown-duration or invalid audio is rejected because its disk requirement cannot be checked reliably.
 
-```bash
-uv run python transcribe.py CASE__Shine_PANEL.m4a --out panel-debug --debug
-```
+These checks **do not reserve memory or disk space** against other applications. The RAM ceiling is checked at processing boundaries using current RSS and the kernel-recorded process peak; it is not an OS-enforced memory limit. PyTorch's allocator limit does not cover every driver/native allocation. For strict host isolation, deploy inside a cgroup/container with an appropriate memory limit in addition to these checks. Configuration cannot promise that arbitrary inputs, changing system load, driver failures, or exhausted storage will never cause failure. Resource failures are reported explicitly, and committed SQLite work is retained.
 
-`run.log` records Python diagnostics. Native MIOpen messages go directly to the terminal; capture both streams when deeper diagnostics are needed:
+## Bounded processing of long recordings
+
+FFmpeg's float32 mono 16 kHz output is copied to disk through bounded buffers. Inference reads bounded spans from that file; it never loads the complete recording into RAM or builds complete-recording GPU features.
+
+Nemotron uses its documented streaming processor and carries its native speaker cache from one call to the next. Speaker IDs therefore do not restart at recognition boundaries. Completed speaker turns are written to SQLite while at most eight open turns remain in memory. Streaming diarization can produce different boundaries/labels than the earlier offline whole-recording mode.
+
+ASR searches **before** the configured core limit for the last quiet window. If none exists, it cuts in the lowest-energy window within the search interval. All source samples belong to exactly one core; overlapping context protects boundary words, and alignment keeps only words whose midpoint belongs to that core. There is no file-size threshold or fixed maximum recording duration: working disk and processing time grow with duration, while audio/model buffers and intermediate-result memory stay bounded. Larger jobs may require increasing the disk budget.
+
+If the model nevertheless reaches the generation limit, the core is split and retried within configured bounds. No token limit is increased automatically, and no truncated output is silently accepted. ASR chunks, speaker turns, words, and segments live in SQLite; final JSON/text/SRT exports are streamed from it rather than assembled in recording-sized Python lists.
+
+## Outputs and memory measurements
+
+The output directory contains:
+
+- `transcript.txt`, `transcript.srt`, `transcript.json` — final timestamped transcript and speaker labels.
+- `raw_asr.json` — streamed recognition export, also attempted on failure.
+- `checkpoints.sqlite3` — durable completed intermediate results. Automatic resume is not implemented.
+- `effective_config.json` — settings used for this run.
+- `run.log` — progress, stage timings, process RAM/GPU snapshots, and failure traceback.
+- `resource_usage.json` — final current/peak process RAM, child-process RAM peak, GPU allocated/reserved peaks, host/GPU availability, and a `completed` flag.
+
+Decoded PCM is removed on normal exit or handled failure. After forced termination, it may remain for manual cleanup. Final transcript files are first written as `.part` files and renamed after export succeeds.
+
+RAM measurements are Linux process RSS/high-water values; child-process peaks may include pages inherited across fork. GPU *allocated* is live PyTorch tensor memory, while *reserved* includes its allocator cache: these overlap and must not be added together. Driver free memory is device-wide. The Radeon APU shares physical memory with the host, so host and GPU figures are not independent totals.
+
+Measured on a 90-second excerpt containing the previously failing interval: direct-to-GPU model loading reduced peak process RAM from **10.35 to 6.36 GiB**; peak GPU tensor allocation was **4.18 GiB**, with **4.55 GiB** peak allocator reservation. These are measured examples, not universal per-file requirements. Streaming diarization used approximately **0.46 GiB** peak GPU tensor allocation.
+
+The full 76.4-minute panel recording completed with 122 continuous, silence-aware cores, no generation-limit retry, and 5,909 aligned words. Peak process RAM was **6.34 GiB**; peak GPU allocation/reservation was **4.18 / 4.81 GiB**. Native low-latency streaming trades throughput for bounded state: speaker detection took about 293 seconds, compared with about 11 seconds for the earlier whole-recording GPU forward. Recognition took about 288 seconds. Transcript accuracy was not manually scored.
+
+## Diagnosis and validation
+
+Native MIOpen output bypasses Python logging. To capture it:
 
 ```bash
 set -o pipefail
 MIOPEN_ENABLE_LOGGING=1 MIOPEN_ENABLE_LOGGING_CMD=1 MIOPEN_LOG_LEVEL=6 \
-  uv run python transcribe.py CASE__Shine_PANEL.m4a --out panel-miopen --debug 2>&1 | tee panel-miopen.log
+  uv run python transcribe.py meeting.m4a --out miopen-debug.transcript --debug 2>&1 | tee miopen-debug.log
 ```
 
-These settings follow [AMD's MIOpen logging documentation](https://rocm.docs.amd.com/projects/MIOpen/en/develop/reference/env_variables.html). Detailed logs can be large. Debug synchronization can slow execution.
+Detailed logs can be large. Keep the working-disk budget in mind.
 
-Model inference uses PyTorch's built-in [MIOpen immediate mode](https://docs.pytorch.org/docs/2.14/backends.html#torch.backends.miopen.immediate). On the Radeon 8060S, the default solver search failed with `Invalid elapsed time` and `miopenStatusUnknownError` for an upsampler input of shape `(1, 192, 486)`, and in the Qwen audio encoders for the final recording chunk. Immediate mode passed the upsampler convolution against a CPU reference and recovered recognition and alignment of the final chunk. The setting is scoped to inference calls; the previous backend setting is restored afterward.
-
-Recording duration affects decoded audio size and the whole-recording diarization input, but Nemotron internally processes chunks with a shared speaker cache. A convolution algorithm selection error alone does not establish that GPU memory ran out. Compare the failure stage, tensor shapes, and memory figures against a successful file. To isolate duration, create a short excerpt with FFmpeg and run it through the same pipeline:
+Run the CPU-side configuration, boundary, checkpoint, and export checks:
 
 ```bash
-ffmpeg -nostdin -i CASE__Shine_PANEL.m4a -t 300 -ac 1 -ar 16000 panel-first-5min.wav
-uv run python transcribe.py panel-first-5min.wav --out panel-short-debug --debug
+uv run python -m unittest discover -s tests -v
 ```
 
-This is a diagnostic comparison; splitting diarization into independent chunks would lose consistent speaker identities across the recording.
+Speaker labels are anonymous and recording-local, with at most eight speakers per recording. Overlap and uncertainty are explicit. Diarization and ASR accuracy are model properties; successful execution does not establish transcript accuracy.
 
-Illustrative output:
+## Authoritative implementation references
 
-```text
-[00:00:01.200–00:00:03.800] SPEAKER_01: Let's start with the deployment.
-[00:00:04.000–00:00:05.700] SPEAKER_02: The tests are finished.
-[00:00:06.100–00:00:07.500] SPEAKER_01: Great, let's proceed.
-```
-
-## Fixed choices
-
-- Diarization runs across the whole file, preserving the model's speaker state. Speaker IDs do not restart at each recognition chunk.
-- Recognition uses 40-second cores with one second of context. If a chunk reaches the 2,048-token limit, it is split in half and retried, down to 10-second cores. A chunk that still reaches the limit fails explicitly; truncated output is never accepted. Alignment restores original timestamps before assigning speakers.
-- Up to **eight distinct speakers per recording**. Labels are local to that recording; `SPEAKER_01` in another file can be a different person.
-- Overlapping speech and uncertain boundaries receive explicit labels. The prototype does not recover two complete word streams from simultaneous speech.
-- The input is downmixed to mono. This is for a mixed meeting recording, not separately recorded participant channels.
-- Models run sequentially on the AMD GPU. Enrollment and pyannote dependencies have been removed.
-
-Diarization can still merge or split people; consistent labels are the model's objective, not a guarantee. On the Radeon 8060S, validation covered diagnostic logging, the failing convolution against a CPU reference, and complete diarization of the 76.4-minute panel recording (837 turns, six speaker labels). Recognition recovered a token-limit repetition loop by splitting its chunk; retained recognition plus the recovered final chunk then passed full alignment and export (116 chunks, 5,901 words). Transcription quality has not been evaluated.
-
-## Setup references
-
-- [AMD compatibility matrix](https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html): select the Ryzen APU / gfx1151 row and match the host OS/kernel.
-- [AMD PyTorch wheels](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/frameworks/pytorch/install.html).
-- [uv projects and local virtual environments](https://docs.astral.sh/uv/guides/projects/).
-- [Qwen ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf), [aligner](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B-hf), [Nemotron diarizer](https://huggingface.co/nvidia/Nemotron-3-Diarization).
-
-The dependencies and model revisions were selected from the October 26, 2026 research. This is a Linux/AMD prototype; the earlier Mac and alternative-model paths are intentionally outside this smaller project.
+- [Qwen's author-maintained chunker and input limits](https://github.com/QwenLM/Qwen3-ASR/blob/main/qwen_asr/inference/utils.py): low-energy boundaries, 1,200-second ASR inputs, 180-second alignment inputs, and a 0.5-second ASR minimum. This application caps the combined ASR/alignment input at 180 seconds and searches only backward so a boundary cannot exceed the configured limit.
+- [NVIDIA's streaming diarization example](https://huggingface.co/nvidia/Nemotron-3-Diarization#streaming-diarization): native processor window sizes and speaker-cache continuation. This implementation consumes each chunk's activity immediately instead of retaining/concatenating all logits.
+- [Hugging Face model loading](https://huggingface.co/docs/transformers/main/models): device-map loading without constructing a full CPU model and then copying it to the GPU. The explicit device map here places every layer on the AMD GPU.
+- [AMD MIOpen immediate mode](https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html) and [PyTorch's supported flag](https://docs.pytorch.org/docs/2.14/backends.html#torch.backends.miopen.immediate): bypassing the failing solver-timing search through a native backend option, not replacing model layers. This mitigates the observed backend failure; it does not repair the underlying driver/library timing issue.
+- [PyTorch allocator budget](https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.set_per_process_memory_fraction.html), [ROCm memory behavior](https://docs.pytorch.org/docs/main/notes/hip.html), and [Linux cgroup memory limits](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html): the distinction between application checks, allocator ceilings, and OS-enforced resource isolation.
