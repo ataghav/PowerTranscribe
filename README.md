@@ -25,7 +25,7 @@ Choose a configuration and a fresh output directory:
 uv run python transcribe.py meeting.m4a --config transcribe.toml --out result.transcript --debug
 ```
 
-Existing nonempty output directories are protected. `--debug` adds GPU synchronization at stage boundaries. Use `--help` for the CLI options.
+Existing output directories are preserved. Repeating the same command automatically selects a fresh numbered sibling, such as `result-2.transcript/`, and prints the selected directory. `--debug` adds GPU synchronization at stage boundaries. Use `--help` for the CLI options.
 
 ## Limits and resource validation
 

@@ -118,6 +118,26 @@ class PipelineTests(unittest.TestCase):
         with sqlite3.connect(path) as connection:
             self.assertEqual(json.loads(connection.execute('SELECT data FROM chunks').fetchone()[0]), value)
 
+    def test_rerun_preserves_previous_output_and_reserves_fresh_directory(self):
+        requested = self.directory/'panel.transcript'
+        first = transcribe.select_output_directory(requested, reserve=True)
+        (first/'transcript.txt').write_text('previous results')
+        planned = transcribe.select_output_directory(requested)
+        self.assertEqual(planned.name, 'panel-2.transcript')
+        self.assertFalse(planned.exists())
+        second = transcribe.select_output_directory(requested, reserve=True)
+        third = transcribe.select_output_directory(requested, reserve=True)
+        self.assertEqual(second.name, 'panel-2.transcript')
+        self.assertEqual(third.name, 'panel-3.transcript')
+        self.assertEqual((first/'transcript.txt').read_text(), 'previous results')
+
+    def test_output_file_is_rejected(self):
+        path = self.directory/'result'
+        path.write_text('keep this file')
+        with self.assertRaisesRegex(ValueError, 'not a directory'):
+            transcribe.select_output_directory(path, reserve=True)
+        self.assertEqual(path.read_text(), 'keep this file')
+
     def test_attribution_sweep_retains_future_turns_for_nested_words(self):
         turns = [dict(start=0., end=.5, speaker='SPEAKER_01'),
                  dict(start=.3, end=.8, speaker='SPEAKER_02'),

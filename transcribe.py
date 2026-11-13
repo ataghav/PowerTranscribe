@@ -346,6 +346,29 @@ def export(out, store, source, config, resources):
         (out/(name+'.part')).replace(out/name)
 
 
+def select_output_directory(requested, reserve=False):
+    """Use a fresh sibling for reruns; mkdir reserves it atomically."""
+    if requested.exists() and not requested.is_dir():
+        raise ValueError(f'Output path is not a directory: {requested}')
+    number = 1
+    while True:
+        if number == 1:
+            candidate = requested
+        elif requested.suffix == '.transcript':
+            candidate = requested.with_name(f'{requested.stem}-{number}.transcript')
+        else:
+            candidate = requested.with_name(f'{requested.name}-{number}')
+        if reserve:
+            try:
+                candidate.mkdir(parents=True, exist_ok=False)
+                return candidate
+            except FileExistsError:
+                pass
+        elif not candidate.exists():
+            return candidate
+        number += 1
+
+
 def main():
     parser = argparse.ArgumentParser(description='Bounded-memory English transcription with anonymous speakers (AMD ROCm).')
     parser.add_argument('audio', type=Path)
@@ -361,10 +384,9 @@ def main():
         source = args.audio.expanduser().resolve(strict=True)
     except (ValueError, OSError) as error:
         parser.error(str(error))
-    out = (args.out or source.with_suffix('.transcript')).expanduser().resolve()
-    if out.exists() and (not out.is_dir() or not args.check and any(out.iterdir())):
-        parser.error(f'Output is not empty or not a directory: {out}. Choose a fresh --out directory.')
+    requested_out = (args.out or source.with_suffix('.transcript')).expanduser().resolve()
     try:
+        out = select_output_directory(requested_out)
         duration = probe_duration(source, config)
         resources = Resources(config, out, torch)
         preflight = resources.preflight(duration)
@@ -376,7 +398,11 @@ def main():
     if args.check:
         log(resources.describe())
         return
-    out.mkdir(parents=True, exist_ok=True)
+    out = select_output_directory(requested_out, reserve=True)
+    resources.directory = out
+    log(f'Output directory: {out}')
+    if out != requested_out:
+        log(f'Preserved existing output at {requested_out}; using a fresh directory for this rerun.')
     handler = logging.FileHandler(out/'run.log', encoding='utf-8')
     handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
     LOGGER.addHandler(handler)
