@@ -11,7 +11,7 @@ uv sync
 uv run python transcribe.py meeting.m4a
 ```
 
-Put recordings in `input/`. A bare filename is resolved there; explicit audio paths are also accepted. Results default to `output/yyddmm-hhmm__<recording>.transcript/`. Every job folder, including custom `--out` names, is prefixed with local start time in year/day/month-hour/minute order (for example, `261411-0907__meeting.transcript` for 14 November 2026 at 09:07). Relative `--out` names are placed under `output/`; absolute paths explicitly select another location. The input and output folders are ignored by Git except for their `.gitkeep` placeholders.
+Put recordings in `input/`. A bare filename is resolved there; explicit audio paths are also accepted. Results default to `output/yymmdd-hhmm__<recording>.transcript/`. Every job folder, including custom `--out` names, is prefixed with local start time in year/month/day-hour/minute order (for example, `261114-0907__meeting.transcript` for 14 November 2026 at 09:07). Relative `--out` names are placed under `output/`; absolute paths explicitly select another location. The input and output folders are ignored by Git except for their `.gitkeep` placeholders.
 
 Models are managed separately from Git. Each run first checks the installed snapshots under `models/`; complete snapshots load locally without contacting Hugging Face. Missing snapshots download at the exact revisions in [models.json](models.json), using the Hugging Face cache where available, and are copied into self-contained local directories. Existing incomplete snapshots fail explicitly rather than being silently replaced. Model storage and the Hugging Face cache need additional disk space beyond the per-job working directory.
 
@@ -64,7 +64,7 @@ uv run python transcribe.py meeting.m4a --config transcribe.toml --out result.tr
 uv run python transcribe.py meeting.m4a --out plain.transcript --no-timestamps
 ```
 
-Existing output directories are preserved. Repeating the same command automatically selects a fresh numbered sibling, within the same minute, such as `261411-0907__result-2.transcript/`, and prints the selected directory. `--debug` enables detailed console diagnostics, model-loading progress bars, tracebacks, and GPU synchronization at stage boundaries. Without it, the console shows the output location, transcript, completion message, and actionable warnings/errors. Detailed stage and memory logs remain in `run.log`; full failure tracebacks are saved there even in normal mode. `--check` explicitly prints its resource-validation summary. Use `--help` for the CLI options.
+Existing output directories are preserved. Repeating the same command automatically selects a fresh numbered sibling, within the same minute, such as `261114-0907__result-2.transcript/`, and prints the selected directory. `--debug` enables detailed console diagnostics, model-loading progress bars, tracebacks, and GPU synchronization at stage boundaries. Without it, the console shows the output location, transcript, completion message, and actionable warnings/errors. Detailed stage and memory logs remain in `run.log`; full failure tracebacks are saved there even in normal mode. `--check` explicitly prints its resource-validation summary. Use `--help` for the CLI options.
 
 ## Limits and resource validation
 

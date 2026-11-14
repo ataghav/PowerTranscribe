@@ -494,7 +494,7 @@ def resolve_audio_path(path):
 
 
 def requested_output_path(option, source):
-    prefix = datetime.now().strftime('%y%d%m-%H%M__')
+    prefix = datetime.now().strftime('%y%m%d-%H%M__')
     if option is None:
         return OUTPUT_DIR/(prefix+source.stem+'.transcript')
     option = option.expanduser()
