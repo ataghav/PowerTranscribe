@@ -17,6 +17,7 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 import numpy as np
 from runtime import Settings, Resources, ResourceLimitError, probe_duration
 from storage import Checkpoints, decode_to_disk, silence_boundary, export_array, write_json_array
+from model_store import REVISIONS, ensure_model
 import torch
 from transformers import (
     AutoProcessor, AutoModelForMultimodalLM,
@@ -34,11 +35,6 @@ INPUT_DIR = PROJECT_DIR/'input'
 OUTPUT_DIR = PROJECT_DIR/'output'
 DEBUG = False
 MONITOR = None
-REVISIONS = {
-    ASR: "bcd2b5b7f32b480ab5790554cfa8347f246a14f3",
-    ALIGNER: "c07281df297b9905d24a508279258cccf987a064",
-    DIARIZER: "f667ed73aee57d40cc39428eb768b4fd87a0a29e",
-}
 
 
 def log(message, console=False):
@@ -122,9 +118,10 @@ def save(path, value):
 
 def load(repo, model_class, dtype=torch.float16):
     with stage(f"loading {repo} revision={REVISIONS[repo]} dtype={dtype}"):
-        processor = AutoProcessor.from_pretrained(repo, revision=REVISIONS[repo])
+        local = str(ensure_model(repo))
+        processor = AutoProcessor.from_pretrained(local, local_files_only=True)
         model = model_class.from_pretrained(
-            repo, revision=REVISIONS[repo], dtype=dtype, device_map={"": DEVICE},
+            local, local_files_only=True, dtype=dtype, device_map={"": DEVICE},
         ).eval()
     return processor, model
 

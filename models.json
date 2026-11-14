@@ -1,0 +1,5 @@
+{
+  "Qwen/Qwen3-ASR-1.7B-hf": "bcd2b5b7f32b480ab5790554cfa8347f246a14f3",
+  "Qwen/Qwen3-ForcedAligner-0.6B-hf": "c07281df297b9905d24a508279258cccf987a064",
+  "nvidia/Nemotron-3-Diarization": "f667ed73aee57d40cc39428eb768b4fd87a0a29e"
+}

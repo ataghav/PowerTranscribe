@@ -13,7 +13,41 @@ uv run python transcribe.py meeting.m4a
 
 Put recordings in `input/`. A bare filename is resolved there; explicit audio paths are also accepted. Results default to `output/<recording>.transcript/`. Relative `--out` names are placed under `output/`; absolute paths explicitly select another location. The input and output folders are ignored by Git except for their `.gitkeep` placeholders.
 
-The pinned models download to the Hugging Face cache on first use. This needs additional disk space beyond the per-job working directory.
+Models are managed separately from Git. Each run first checks the installed snapshots under `models/`; complete snapshots load locally without contacting Hugging Face. Missing snapshots download at the exact revisions in [models.json](models.json), using the Hugging Face cache where available, and are copied into self-contained local directories. Existing incomplete snapshots fail explicitly rather than being silently replaced. Model storage and the Hugging Face cache need additional disk space beyond the per-job working directory.
+
+## Model backup and restore
+
+I store a backup of the model weights in my personal OneDrive account. The backup is managed manually; these scripts do not sign in to or upload to OneDrive. Neither the weights nor ZIP archives are committed to Git.
+
+From the repository root, download all three pinned model snapshots and create the backup:
+
+```bash
+uv run python docs/download_models.py
+```
+
+This installs the models under `models/` and writes `docs/powertranscribe-models.zip`. Copy that ZIP to your personal OneDrive. Existing archives are never overwritten; use `--archive /path/to/new-backup.zip` for a different destination. The ZIP uses ZIP64 and no compression to avoid spending CPU compressing large weight files. Allow room for the Hugging Face cache, installed snapshots, and ZIP simultaneously. An interrupted archive creation can leave an incomplete ZIP; remove that incomplete file or choose a new destination before retrying.
+
+The archive includes complete model snapshots (weights, configuration, tokenizer/processor files, and repository documentation/license files) and a per-model manifest recording repository, pinned revision, file sizes, and SHA-256 checksums. Cache symlinks are copied as real files. Existing snapshots are fully checksum-verified before archiving.
+
+To restore on another machine, first make the ZIP available locally from OneDrive, then run:
+
+```bash
+python3 docs/restore_models.py /path/to/powertranscribe-models.zip
+```
+
+Restore uses only the Python standard library, extracts into a temporary directory, and verifies all models against the revisions expected by this checkout before installation. It rejects checksum failures and unsafe archive paths. Existing valid installations are verified and retained; existing damaged installations are reported and must be moved aside before retrying. Use only your trusted backup: checksums detect corruption, not a maliciously replaced archive and manifest. Retain the models' license files and terms with the backup.
+
+Both scripts and transcription respect `POWERTRANSCRIBE_MODELS=/absolute/path/to/models` to select another installation directory. Normal runs check manifest identities and file sizes without rehashing gigabytes of weights; backup and restore perform full checksum verification.
+
+After installing Python dependencies and restoring models, test without Hub access:
+
+```bash
+HF_HUB_OFFLINE=1 uv run --offline python transcribe.py meeting.m4a
+```
+
+Missing models then produce an error rather than a network download. The archive contains model artifacts only: Python packages, FFmpeg, ROCm, and drivers still need separate installation. `uv.lock` pins the Python environment but does not back up the package downloads.
+
+## Run options
 
 Validate configuration, audio metadata, and available resources before decoding or loading model weights:
 

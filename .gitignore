@@ -1,4 +1,6 @@
 .venv/
+/models/
+/docs/*.zip
 __pycache__/
 
 # Local recordings and generated runs; keep the directory layout in Git.
