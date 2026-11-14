@@ -23,3 +23,7 @@ max_new_tokens = 2048
 miopen_immediate = true
 diarization_mode = "low_latency"
 speaker_threshold = 0.5
+
+# Fill short UNKNOWN runs only between matching, unambiguous speakers. Zero disables.
+unknown_max_words = 2
+unknown_max_gap_seconds = 0.5

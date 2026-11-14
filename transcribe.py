@@ -328,9 +328,8 @@ def timestamp(seconds, srt=False):
     return f'{hours:02}:{minutes:02}:{seconds:02}{"," if srt else "."}{milliseconds:03}'
 
 
-def export(out, store, source, resources, include_timestamps=True):
-    store.prepare_export()
-    segment, segment_id = None, None
+def attributed_words(store, resources):
+    """Attribute the ordered word stream without accumulating the recording."""
     turns = iter(store.rows('turns'))
     upcoming = next(turns, None)
     active = []
@@ -344,6 +343,55 @@ def export(out, store, source, resources, include_timestamps=True):
             upcoming = next(turns, None)
         # Sweep both ordered streams once; retained turns span at most one word's look-ahead.
         attribute([word], [turn for turn in active if turn['start'] < end])
+        # Re-export always derives labels from diarization, not earlier inference.
+        word.pop('original_speaker', None)
+        word.pop('speaker_inference', None)
+        yield identity, word
+
+
+def fill_unknown_speakers(words, max_words=2, max_gap_seconds=0.5):
+    """Bounded look-ahead; never bridge differing speakers or conflicting evidence."""
+    pending, previous, oversized = [], None, False
+    for identity, word in words:
+        if word['speaker'] == 'UNKNOWN' and max_words > 0 and max_gap_seconds > 0:
+            if oversized:
+                yield identity, word
+            else:
+                pending.append((identity, word))
+                if len(pending) > max_words:
+                    yield from pending
+                    pending.clear()
+                    oversized = True
+            continue
+        if pending:
+            speaker = word['speaker']
+            chain = ([previous] if previous is not None else []) + [w for _, w in pending] + [word]
+            matches = (previous is not None and speaker.startswith('SPEAKER_')
+                       and previous['speaker'] == speaker
+                       and not previous.get('overlapping', False) and not word.get('overlapping', False))
+            close = all(-1e-9 <= b['start']-a['end'] <= max_gap_seconds+1e-9
+                        for a, b in zip(chain, chain[1:]))
+            compatible = all(not w.get('overlapping', False)
+                             and all(candidate == speaker for candidate in w.get('candidates', []))
+                             for _, w in pending)
+            if matches and close and compatible:
+                for _, unknown in pending:
+                    unknown.update(original_speaker='UNKNOWN', speaker=speaker,
+                                   speaker_inference='matching_neighbors')
+            yield from pending
+            pending.clear()
+        yield identity, word
+        previous, oversized = word, False
+    yield from pending
+
+
+def export(out, store, source, resources, include_timestamps=True,
+           unknown_max_words=2, unknown_max_gap_seconds=0.5):
+    store.prepare_export()
+    segment, segment_id = None, None
+    words = fill_unknown_speakers(attributed_words(store, resources),
+                                 unknown_max_words, unknown_max_gap_seconds)
+    for identity, word in words:
         if segment and segment['speaker'] == word['speaker']:
             segment['end'] = max(segment['end'], word['end'])
         else:
@@ -521,7 +569,9 @@ def main():
         with stage('word alignment'):
             align(audio, store, config, resources)
         with stage('speaker attribution and export'):
-            export(out, store, source, resources, include_timestamps=not args.no_timestamps)
+            export(out, store, source, resources, include_timestamps=not args.no_timestamps,
+                   unknown_max_words=config.unknown_max_words,
+                   unknown_max_gap_seconds=config.unknown_max_gap_seconds)
         completed = True
         log(f'Saved transcript to {out}', console=True)
         log(resources.describe())

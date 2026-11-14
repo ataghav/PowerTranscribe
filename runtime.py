@@ -40,6 +40,8 @@ class Settings:
     miopen_immediate: bool
     diarization_mode: str
     speaker_threshold: float
+    unknown_max_words: int
+    unknown_max_gap_seconds: float
 
     @classmethod
     def read(cls, path):
@@ -58,7 +60,8 @@ class Settings:
             if field.type is int and value > sys.maxsize:
                 raise ValueError(f"Config {field.name}: exceeds the platform integer limit")
             zero_allowed = field.name in ('context_seconds', 'silence_rms', 'min_free_ram_gib',
-                                           'min_free_gpu_gib', 'min_free_disk_gib')
+                                           'min_free_gpu_gib', 'min_free_disk_gib', 'unknown_max_words',
+                                           'unknown_max_gap_seconds')
             if field.type in (int, float) and (value < 0 or value == 0 and not zero_allowed):
                 condition = 'nonnegative' if zero_allowed else 'positive'
                 raise ValueError(f"Config {field.name}: must be {condition}, got {value}")

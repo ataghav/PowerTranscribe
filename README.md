@@ -86,6 +86,8 @@ All operational budgets and chunking settings are in [transcribe.toml](transcrib
 | `min_chunk_seconds` / `max_new_tokens` | 10 / 2048 | Stop retrying token-limited cores at this duration; never accept truncated output |
 | `diarization_mode` | `low_latency` | NVIDIA's supported streaming preset; alternatives are validated by name |
 | `miopen_immediate` | `true` | Native PyTorch/MIOpen convolution selection mode during inference |
+| `unknown_max_words` | 2 | Maximum consecutive UNKNOWN words eligible for contextual speaker inference; 0 disables |
+| `unknown_max_gap_seconds` | 0.5 | Maximum gap between each neighboring word in a contextual fill, including both bounding words; 0 disables |
 
 Startup checks compare budgets plus headroom against host/WSL RAM (including cgroup v2 limits when present), GPU free memory, and free working-disk space. They also check model input/context limits, a conservative model-memory envelope, CPU count, and estimated disk requirements from the recording duration. Error messages name the offending setting and the required/available capacity. Unknown-duration or invalid audio is rejected because its disk requirement cannot be checked reliably.
 
@@ -104,6 +106,8 @@ If the model nevertheless reaches the generation limit, the core is split and re
 ## Outputs and memory measurements
 
 Consecutive words with the same speaker label are combined until that label changes, including across pauses and recognition chunks. The merged range starts at the first word and ends at the latest word end. The old `max_segment_seconds` and `max_segment_gap_seconds` settings have been removed. Segment text is streamed from its member words in SQLite, so an uninterrupted speaker does not require a recording-sized string in RAM.
+
+Before grouping, short UNKNOWN runs can inherit a speaker from their immediate neighbors. By default, at most two UNKNOWN words are filled only when both bounding words have the same unambiguous speaker label and every adjacent gap is between 0 and 0.5 seconds. Runs at recording edges, longer runs, overlapping word intervals, differing bounding speakers, overlap labels, or conflicting detected speaker candidates remain unchanged. This uses bounded look-ahead, including across recognition chunks. Set either `unknown_max_words` or `unknown_max_gap_seconds` to 0 to disable it. Filled JSON words retain `original_speaker: "UNKNOWN"` and `speaker_inference: "matching_neighbors"`; inferred labels are contextual estimates, not new detector evidence. TXT/SRT and JSON segments use the filled labels and merge accordingly; word timestamps are unchanged. Existing exports are not modified automatically.
 
 `--no-timestamps` controls leading ranges in TXT/terminal output. JSON retains word/segment timing, and SRT retains the timing required for subtitles. SRT cues follow the same speaker-turn grouping, so a long uninterrupted speaker produces a long cue.
 

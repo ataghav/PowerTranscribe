@@ -174,6 +174,62 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual((segments[0]['start'], segments[0]['end']), (0., 101.))
         self.assertEqual([s['speaker'] for s in segments], ['SPEAKER_01', 'SPEAKER_02', 'SPEAKER_01'])
 
+    def test_unknown_gap_fill_preserves_uncertainty_and_bounds(self):
+        def word(start, speaker='UNKNOWN', candidates=(), overlapping=False):
+            return dict(start=start, end=start+.1, text='word', speaker=speaker,
+                        candidates=list(candidates), overlapping=overlapping)
+
+        cases = [
+            ([word(0, 'SPEAKER_01'), word(.2), word(.4, 'SPEAKER_01')], True),
+            ([word(0, 'SPEAKER_01'), word(.2), word(.3), word(.5, 'SPEAKER_01')], True),
+            ([word(0, 'SPEAKER_01'), word(.2), word(.4, 'SPEAKER_02')], False),
+            ([word(0, 'SPEAKER_01'), word(.2), word(2, 'SPEAKER_01')], False),
+            ([word(0, 'SPEAKER_01'), word(2), word(2.2, 'SPEAKER_01')], False),
+            ([word(0, 'SPEAKER_01'), word(.2), word(.3), word(.4), word(.6, 'SPEAKER_01')], False),
+            ([word(.2), word(.4, 'SPEAKER_01')], False),
+            ([word(0, 'SPEAKER_01'), word(.2)], False),
+            ([word(0, 'SPEAKER_01'), word(.2, candidates=['SPEAKER_02']), word(.4, 'SPEAKER_01')], False),
+            ([word(0, 'SPEAKER_01'), word(.2, overlapping=True), word(.4, 'SPEAKER_01')], False),
+            ([word(0, 'OVERLAP[SPEAKER_01,SPEAKER_02]'), word(.2),
+              word(.4, 'OVERLAP[SPEAKER_01,SPEAKER_02]')], False),
+        ]
+        for items, inferred in cases:
+            with self.subTest(items=items):
+                unknowns = [w for w in items if w['speaker'] == 'UNKNOWN']
+                result = list(transcribe.fill_unknown_speakers(enumerate(items)))
+                self.assertEqual(len(result), len(items))
+                for w in unknowns:
+                    self.assertEqual(w['speaker'], 'SPEAKER_01' if inferred else 'UNKNOWN')
+                    self.assertEqual(w.get('original_speaker'), 'UNKNOWN' if inferred else None)
+        items = [word(0, 'SPEAKER_01'), word(.2), word(.4, 'SPEAKER_01')]
+        self.assertEqual(list(transcribe.fill_unknown_speakers(enumerate(items), max_words=0))[1][1]['speaker'],
+                         'UNKNOWN')
+
+    def test_unknown_gap_fill_merges_exports_and_can_be_disabled(self):
+        store = Checkpoints(self.directory/'checkpoints.sqlite3', self.config)
+        self.addCleanup(store.close)
+        store.add('turns', [dict(start=0., end=.2, speaker='SPEAKER_01'),
+                            dict(start=.4, end=.6, speaker='SPEAKER_01')])
+        store.add('words', [dict(start=0., end=.2, text='This'),
+                            dict(start=.25, end=.35, text='really'),
+                            dict(start=.4, end=.6, text='works')])
+        with redirect_stdout(io.StringIO()):
+            transcribe.export(self.directory, store, Path('source.wav'), Mock())
+        data = json.loads((self.directory/'transcript.json').read_text())
+        self.assertEqual(len(data['segments']), 1)
+        self.assertEqual(data['segments'][0]['text'], 'This really works')
+        self.assertEqual((data['segments'][0]['start'], data['segments'][0]['end']), (0., .6))
+        self.assertEqual(data['words'][1]['original_speaker'], 'UNKNOWN')
+        self.assertEqual(data['words'][1]['speaker_inference'], 'matching_neighbors')
+        self.assertEqual((self.directory/'transcript.txt').read_text().count('SPEAKER_01:'), 1)
+        self.assertEqual((self.directory/'transcript.srt').read_text().count(' --> '), 1)
+        with redirect_stdout(io.StringIO()):
+            transcribe.export(self.directory, store, Path('source.wav'), Mock(), unknown_max_words=0)
+        data = json.loads((self.directory/'transcript.json').read_text())
+        self.assertEqual(len(data['segments']), 3)
+        self.assertEqual(data['words'][1]['speaker'], 'UNKNOWN')
+        self.assertNotIn('speaker_inference', data['words'][1])
+
     def test_plain_output_option_keeps_structured_times_and_exports_repeatably(self):
         store = Checkpoints(self.directory/'checkpoints.sqlite3', self.config)
         self.addCleanup(store.close)
