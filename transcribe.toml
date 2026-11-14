@@ -1,0 +1,29 @@
+# GiB means 1024**3 bytes. These are per-job budgets, not physical reservations.
+ram_budget_gib = 12.0
+gpu_budget_gib = 8.0
+min_free_ram_gib = 2.0
+min_free_gpu_gib = 1.0
+working_disk_gib = 16.0
+min_free_disk_gib = 2.0
+cpu_threads = 4
+io_buffer_mib = 1
+sqlite_cache_mib = 8
+probe_timeout_seconds = 30
+
+# Cores never exceed this duration. Context is added on each side for ASR/alignment.
+max_chunk_seconds = 40.0
+min_chunk_seconds = 10.0
+context_seconds = 1.0
+silence_search_seconds = 5.0
+silence_window_seconds = 0.3
+silence_rms = 0.001
+max_new_tokens = 2048
+
+# Documented native backend / streaming settings; no model layers are replaced.
+miopen_immediate = true
+diarization_mode = "low_latency"
+speaker_threshold = 0.5
+
+# Fill short UNKNOWN runs only between matching, unambiguous speakers. Zero disables.
+unknown_max_words = 2
+unknown_max_gap_seconds = 0.5
