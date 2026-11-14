@@ -60,11 +60,17 @@ Choose a configuration and a run name:
 ```bash
 uv run python transcribe.py meeting.m4a --config transcribe.toml --out result.transcript --debug
 
-# Omit leading time ranges from the TXT file and terminal output:
+# Omit leading time ranges from the TXT file:
 uv run python transcribe.py meeting.m4a --out plain.transcript --no-timestamps
 ```
 
-Existing output directories are preserved. Repeating the same command automatically selects a fresh numbered sibling, within the same minute, such as `261114-0907__result-2.transcript/`, and prints the selected directory. `--debug` enables detailed console diagnostics, model-loading progress bars, tracebacks, and GPU synchronization at stage boundaries. Without it, the console shows the output location, transcript, completion message, and actionable warnings/errors. Detailed stage and memory logs remain in `run.log`; full failure tracebacks are saved there even in normal mode. `--check` explicitly prints its resource-validation summary. Use `--help` for the CLI options.
+Existing output directories are preserved. Repeating the same command automatically selects a fresh numbered sibling, within the same minute, such as `261114-0907__result-2.transcript/`, and prints the selected directory. `--debug` enables detailed console diagnostics, model-loading progress bars, tracebacks, and GPU synchronization at stage boundaries. Without it, the console shows compact model status and processing progress, the output location, and actionable warnings/errors. Percentages update on the same terminal line and each completed step becomes `done`; the full transcript is written to files rather than printed. Detailed stage and memory logs remain in `run.log`; full failure tracebacks are saved there even in normal mode. `--check` explicitly prints its resource-validation summary. Use `--help` for the CLI options.
+
+## Terminal progress
+
+Normal runs show a `models` section with each pinned model marked `detected locally` or `downloading N%`, followed by a `processing` section for decoding, speaker detection, recognition, checkpoint export, alignment, and final attribution/export. Each active row is refreshed in place, at most a few times per second, then marked `done`. Download percentages reflect Hub transfer/reconstruction or completed-file progress; preparation and verification are shown as status text. Processing percentages measure completed audio, chunks, or export work rather than estimated time remaining. Model loading can take time before a processing percentage advances.
+
+When output is redirected, only start/end rows are emitted, without terminal escape sequences or repeated percentage lines. `--debug` additionally enables detailed diagnostic logs. A successful run ends with elapsed job duration in seconds, the number of detected speaker IDs, and the number of merged speaking turns (including UNKNOWN/overlap entries), plus the output directory. These counts are model-derived, not a verified count of real people or conversational interruptions. Detailed diagnostics remain in `run.log`.
 
 ## Limits and resource validation
 
@@ -109,7 +115,7 @@ Consecutive words with the same speaker label are combined until that label chan
 
 Before grouping, short UNKNOWN runs can inherit a speaker from their immediate neighbors. By default, at most two UNKNOWN words are filled only when both bounding words have the same unambiguous speaker label and every adjacent gap is between 0 and 0.5 seconds. Runs at recording edges, longer runs, overlapping word intervals, differing bounding speakers, overlap labels, or conflicting detected speaker candidates remain unchanged. This uses bounded look-ahead, including across recognition chunks. Set either `unknown_max_words` or `unknown_max_gap_seconds` to 0 to disable it. Filled JSON words retain `original_speaker: "UNKNOWN"` and `speaker_inference: "matching_neighbors"`; inferred labels are contextual estimates, not new detector evidence. TXT/SRT and JSON segments use the filled labels and merge accordingly; word timestamps are unchanged. Existing exports are not modified automatically.
 
-`--no-timestamps` controls leading ranges in TXT/terminal output. JSON retains word/segment timing, and SRT retains the timing required for subtitles. SRT cues follow the same speaker-turn grouping, so a long uninterrupted speaker produces a long cue.
+`--no-timestamps` controls leading ranges in TXT output. JSON retains word/segment timing, and SRT retains the timing required for subtitles. SRT cues follow the same speaker-turn grouping, so a long uninterrupted speaker produces a long cue.
 
 The output directory contains:
 

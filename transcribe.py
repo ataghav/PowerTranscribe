@@ -19,6 +19,7 @@ import numpy as np
 from runtime import Settings, Resources, ResourceLimitError, probe_duration
 from storage import Checkpoints, decode_to_disk, silence_boundary, export_array, write_json_array
 from model_store import REVISIONS, ensure_model
+from progress import Progress
 import torch
 from transformers import (
     AutoProcessor, AutoModelForMultimodalLM,
@@ -36,6 +37,7 @@ INPUT_DIR = PROJECT_DIR/'input'
 OUTPUT_DIR = PROJECT_DIR/'output'
 DEBUG = False
 MONITOR = None
+PROGRESS = None
 
 
 def log(message, console=False):
@@ -89,8 +91,10 @@ def gpu_memory():
 
 
 @contextmanager
-def stage(name):
+def stage(name, show_progress=False):
     started = time.monotonic()
+    if show_progress and PROGRESS:
+        PROGRESS.start(f'step {name}')
     log(f"Starting {name}; {gpu_memory()}")
     try:
         if MONITOR is not None:
@@ -101,9 +105,13 @@ def stage(name):
         if DEBUG and torch.cuda.is_available():
             torch.cuda.synchronize()
     except Exception:
+        if show_progress and PROGRESS:
+            PROGRESS.finish('failed')
         LOGGER.debug("Failed %s after %.1fs; %s", name, time.monotonic() - started, gpu_memory())
         raise
     else:
+        if show_progress and PROGRESS:
+            PROGRESS.finish()
         log(f"Finished {name} in {time.monotonic() - started:.1f}s; {gpu_memory()}")
 
 
@@ -180,6 +188,8 @@ def diarize(audio, store, config, resources):
             if turns:
                 store.add('turns', turns)
             frame_cursor += len(active)
+            if PROGRESS:
+                PROGRESS.update(frame_cursor/total_frames)
             if len(active):
                 previous = active[-1]
             if frame_cursor*frame_seconds >= next_report or last:
@@ -238,6 +248,8 @@ def recognize(audio, store, config, resources):
         log(f'2/3 Recognizing words: {core_start:.2f}–{core_end:.2f}s / {audio.duration:.2f}s; {resources.describe()}')
         recognize_range(core_start, core_end)
         core_start = core_end
+        if PROGRESS:
+            PROGRESS.update(core_start/audio.duration)
     del model, processor
     release()
 
@@ -246,6 +258,8 @@ def align(audio, store, config, resources):
     processor, model = load(ALIGNER, AutoModelForTokenClassification)
     count = store.count('chunks')
     for i, chunk in enumerate(store.rows('chunks'), 1):
+        if PROGRESS:
+            PROGRESS.update((i-1)/max(1, count))
         resources.check()
         log(f'3/3 Aligning words: {i}/{count}; {resources.describe()}')
         if not chunk['text']:
@@ -387,12 +401,15 @@ def fill_unknown_speakers(words, max_words=2, max_gap_seconds=0.5):
 
 
 def export(out, store, source, resources, include_timestamps=True,
-           unknown_max_words=2, unknown_max_gap_seconds=0.5):
+           unknown_max_words=2, unknown_max_gap_seconds=0.5, print_transcript=True):
     store.prepare_export()
     segment, segment_id = None, None
     words = fill_unknown_speakers(attributed_words(store, resources),
                                  unknown_max_words, unknown_max_gap_seconds)
-    for identity, word in words:
+    total_words = max(1, store.count('words'))
+    for index, (identity, word) in enumerate(words, 1):
+        if PROGRESS:
+            PROGRESS.update(.4*index/total_words)
         if segment and segment['speaker'] == word['speaker']:
             segment['end'] = max(segment['end'], word['end'])
         else:
@@ -403,13 +420,17 @@ def export(out, store, source, resources, include_timestamps=True,
         store.update_word(identity, word, segment_id)
     if segment is not None:
         store.finish_segment(segment_id, segment)
+    total_segments = max(1, store.count('segments'))
     with (out/'transcript.txt.part').open('w', encoding='utf-8') as text_file, \
             (out/'transcript.srt.part').open('w', encoding='utf-8') as srt_file:
         for i, (identity, segment) in enumerate(store.segments_with_ids(), 1):
+            if PROGRESS:
+                PROGRESS.update(.4+.3*(i-1)/total_segments)
             prefix = (f'[{timestamp(segment["start"])}–{timestamp(segment["end"])}] '
                       if include_timestamps else '') + segment['speaker']+': '
             text_file.write(prefix)
-            print(prefix, end='')
+            if print_transcript:
+                print(prefix, end='')
             srt_file.write(f'{i}\n{timestamp(segment["start"], True)} --> '
                            f'{timestamp(max(segment["end"], segment["start"]+.05), True)}\n'
                            f'{segment["speaker"]}: ')
@@ -419,18 +440,22 @@ def export(out, store, source, resources, include_timestamps=True,
                 resources.check_disk(len(fragment.encode('utf-8'))*2)
                 text_file.write(fragment)
                 srt_file.write(fragment)
-                print(fragment, end='')
+                if print_transcript:
+                    print(fragment, end='')
                 first = False
             text_file.write('\n')
             srt_file.write('\n\n')
-            print()
+            if print_transcript:
+                print()
     with (out/'transcript.json.part').open('w', encoding='utf-8') as file:
         file.write('{"source":'+json.dumps(str(source))+',"models":'+json.dumps(REVISIONS))
         file.write(',"words":')
         write_json_array(file, store.rows('words'), resources)
         file.write(',"segments":[')
         first_segment = True
-        for identity, segment in store.segments_with_ids():
+        for index, (identity, segment) in enumerate(store.segments_with_ids(), 1):
+            if PROGRESS:
+                PROGRESS.update(.7+.25*(index-1)/total_segments)
             file.write(('' if first_segment else ',')+json.dumps(segment)[:-1]+',"text":"')
             first_word = True
             for word in store.segment_words(identity):
@@ -512,6 +537,7 @@ def requested_output_path(option, source):
 
 
 def main():
+    started = time.monotonic()
     parser = argparse.ArgumentParser(description='Bounded-memory English transcription with anonymous speakers (AMD ROCm).')
     parser.add_argument('audio', type=Path)
     parser.add_argument('--out', type=Path, help='Run directory under output/; absolute paths override this location')
@@ -520,7 +546,7 @@ def main():
     parser.add_argument('--check', action='store_true', help='Validate configuration and available resources without decoding or loading models')
     parser.add_argument('--debug', action='store_true', help='Synchronize GPU at diagnostic stage boundaries')
     args = parser.parse_args()
-    global DEBUG, MONITOR
+    global DEBUG, MONITOR, PROGRESS
     DEBUG = args.debug
     configure_logging(DEBUG)
     try:
@@ -561,23 +587,53 @@ def main():
     pcm = out/'decoded.f32'
     store = None
     completed = False
+    PROGRESS = Progress()
     try:
-        with stage('bounded audio decoding'):
-            audio = decode_to_disk(source, pcm, config, resources)
+        PROGRESS.section('models')
+        for repo in REVISIONS:
+            PROGRESS.start(f'model {repo}', 'checking locally')
+            model_status = []
+            def model_progress(status, fraction):
+                model_status[:] = [status]
+                if status == 'downloading':
+                    PROGRESS.update(fraction, 'downloading')
+                elif status != 'detected locally':
+                    PROGRESS.status(status)
+            try:
+                ensure_model(repo, progress=model_progress)
+            except Exception:
+                PROGRESS.finish('failed')
+                raise
+            PROGRESS.finish('detected locally' if model_status == ['detected locally'] else 'done (installed locally)')
+        PROGRESS.stream.write('\n===\n')
+        PROGRESS.section('processing')
+        with stage('audio decoding', show_progress=True):
+            audio = decode_to_disk(source, pcm, config, resources,
+                                   progress=PROGRESS.update, duration=duration)
         store = Checkpoints(out/'checkpoints.sqlite3', config)
-        with stage('streaming speaker detection'):
+        with stage('speaker detection', show_progress=True):
             diarize(audio, store, config, resources)
-        with stage('silence-aware recognition'):
+        with stage('speech recognition', show_progress=True):
             recognize(audio, store, config, resources)
-        export_array(out/'raw_asr.json', store.rows('chunks'), resources)
-        with stage('word alignment'):
+        with stage('recognition checkpoint export', show_progress=True):
+            def chunk_rows():
+                count = max(1, store.count('chunks'))
+                for index, chunk in enumerate(store.rows('chunks'), 1):
+                    yield chunk
+                    PROGRESS.update(index/count)
+            export_array(out/'raw_asr.json', chunk_rows(), resources)
+        with stage('word alignment', show_progress=True):
             align(audio, store, config, resources)
-        with stage('speaker attribution and export'):
+        with stage('speaker attribution and export', show_progress=True):
             export(out, store, source, resources, include_timestamps=not args.no_timestamps,
                    unknown_max_words=config.unknown_max_words,
-                   unknown_max_gap_seconds=config.unknown_max_gap_seconds)
+                   unknown_max_gap_seconds=config.unknown_max_gap_seconds, print_transcript=False)
         completed = True
-        log(f'Saved transcript to {out}', console=True)
+        speakers = {turn['speaker'] for turn in store.rows('turns')}
+        PROGRESS.stream.write(f'\n===\n\nfinished successfully!\nduration: {time.monotonic()-started:.1f} sec\n'
+                              f'# speakers: {len(speakers)}\n# speaking turns: {store.count("segments")}\n'
+                              f'output: {out}\n')
+        PROGRESS.stream.flush()
         log(resources.describe())
     except torch.OutOfMemoryError as error:
         raise ResourceLimitError(
@@ -601,6 +657,7 @@ def main():
         except Exception as error:
             LOGGER.warning('Could not save final resource measurements: %s', error)
         handler.flush()
+        PROGRESS = None
 
 
 if __name__ == "__main__":

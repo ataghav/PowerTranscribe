@@ -224,7 +224,11 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual((self.directory/'transcript.txt').read_text().count('SPEAKER_01:'), 1)
         self.assertEqual((self.directory/'transcript.srt').read_text().count(' --> '), 1)
         with redirect_stdout(io.StringIO()):
-            transcribe.export(self.directory, store, Path('source.wav'), Mock(), unknown_max_words=0)
+            terminal = io.StringIO()
+            with redirect_stdout(terminal):
+                transcribe.export(self.directory, store, Path('source.wav'), Mock(), unknown_max_words=0,
+                                  print_transcript=False)
+            self.assertEqual(terminal.getvalue(), '')
         data = json.loads((self.directory/'transcript.json').read_text())
         self.assertEqual(len(data['segments']), 3)
         self.assertEqual(data['words'][1]['speaker'], 'UNKNOWN')

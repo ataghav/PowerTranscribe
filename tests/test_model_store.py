@@ -73,3 +73,27 @@ class ModelStoreTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Unsafe model file path', result.stderr)
         self.assertFalse((self.root/'escaped').exists())
+
+    def test_download_callback_and_standalone_install(self):
+        repo = next(iter(models.REVISIONS))
+        source = self.root/'cached'
+        source.mkdir()
+        (source/'config.json').write_text('{}')
+        updates = []
+
+        def download(**kwargs):
+            self.assertEqual(kwargs['revision'], models.REVISIONS[repo])
+            bar = kwargs['tqdm_class'](iterable=[1, 2], total=2, desc='Fetching files')
+            list(bar)
+            bar.close()
+            return str(source)
+
+        with patch.dict(os.environ, POWERTRANSCRIBE_MODELS=str(self.root/'installed'), HF_HUB_OFFLINE='0'), \
+                patch('huggingface_hub.snapshot_download', side_effect=download) as fetch:
+            target = models.ensure_model(repo, progress=lambda status, value: updates.append((status, value)))
+            models.validate(target, repo, hashes=True)
+            self.assertIn(('downloading', .5), updates)
+            self.assertIn(('installing and verifying', 1), updates)
+            models.ensure_model(repo, progress=lambda status, value: updates.append((status, value)))
+            self.assertEqual(updates[-1], ('detected locally', 1))
+            self.assertEqual(fetch.call_count, 1)

@@ -44,17 +44,49 @@ def validate(path, repo, hashes=False):
     return manifest
 
 
-def ensure_model(repo):
+def ensure_model(repo, progress=None):
     target = model_root()/relative_model(repo)
     if target.exists():
         validate(target, repo)
+        if progress:
+            progress('detected locally', 1)
         return target
     if os.environ.get('HF_HUB_OFFLINE', '').upper() in ('1', 'ON', 'YES', 'TRUE'):
         raise FileNotFoundError(f'Model missing: {target}. Restore with docs/restore_models.py.')
     from huggingface_hub import snapshot_download
+    from tqdm.auto import tqdm
+
+    class DownloadProgress(tqdm):
+        def __init__(self, *args, **kwargs):
+            kwargs.pop('name', None)
+            kwargs['disable'] = True
+            self.file_progress = kwargs.get('unit') != 'B'
+            self.reconstruction = kwargs.get('desc', '').startswith('Reconstructing')
+            super().__init__(*args, **kwargs)
+
+        def update(self, n=1):
+            self.n += n
+            if progress and (self.reconstruction or self.file_progress) and self.total:
+                progress('downloading', self.n/self.total)
+
+        def __iter__(self):
+            if not self.file_progress:
+                yield from super().__iter__()
+                return
+            total = self.total or 1
+            for i, item in enumerate(self.iterable, 1):
+                yield item
+                if progress:
+                    progress('downloading', i/total)
+
+    if progress:
+        progress('downloading', 0)
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.download-', dir=target.parent) as temporary:
-        snapshot = Path(snapshot_download(repo_id=repo, revision=REVISIONS[repo]))
+        snapshot = Path(snapshot_download(repo_id=repo, revision=REVISIONS[repo],
+                                          **({'tqdm_class': DownloadProgress} if progress else {})))
+        if progress:
+            progress('installing and verifying', 1)
         staged = Path(temporary)/'snapshot'
         # Dereference cache symlinks so this copy survives cache removal.
         shutil.copytree(snapshot, staged, symlinks=False)

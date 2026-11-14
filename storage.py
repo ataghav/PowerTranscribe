@@ -38,7 +38,7 @@ class AudioFile:
         return self.read_samples(a, b-a)
 
 
-def decode_to_disk(source, target, config, resources):
+def decode_to_disk(source, target, config, resources, progress=None, duration=None):
     """No unbounded subprocess stdout/stderr capture, including on malformed input."""
     block_size = config.io_buffer_mib*1024**2
     errors = deque(maxlen=8)
@@ -61,6 +61,8 @@ def decode_to_disk(source, target, config, resources):
                 if len(block) % 4 or not np.isfinite(np.frombuffer(block, dtype='<f4')).all():
                     raise ValueError('Decoder returned invalid float32 audio')
                 file.write(block)
+                if progress and duration:
+                    progress(file.tell()/(duration*SR*4))
         returncode = process.wait()
         reader.join()
         if returncode:
