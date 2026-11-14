@@ -257,16 +257,19 @@ class PipelineTests(unittest.TestCase):
         source = input_dir/'meeting.m4a'
         source.write_bytes(b'recording')
         with patch.object(transcribe, 'PROJECT_DIR', self.directory), \
-                patch.object(transcribe, 'INPUT_DIR', input_dir), patch.object(transcribe, 'OUTPUT_DIR', output_dir):
+                patch.object(transcribe, 'INPUT_DIR', input_dir), patch.object(transcribe, 'OUTPUT_DIR', output_dir), \
+                patch.object(transcribe, 'datetime') as clock:
+            from datetime import datetime
+            clock.now.return_value = datetime(2026, 11, 14, 9, 7)
             self.assertEqual(transcribe.resolve_audio_path(Path('meeting.m4a')), source)
             self.assertEqual(transcribe.resolve_audio_path(Path('input/meeting.m4a')), source)
-            self.assertEqual(transcribe.requested_output_path(None, source), output_dir/'meeting.transcript')
-            self.assertEqual(transcribe.requested_output_path(Path('custom'), source), output_dir/'custom')
-            self.assertEqual(transcribe.requested_output_path(Path('output/custom'), source), output_dir/'custom')
-            self.assertEqual(transcribe.requested_output_path(Path('.'), source), output_dir/'meeting.transcript')
+            self.assertEqual(transcribe.requested_output_path(None, source), output_dir/'261411-0907__meeting.transcript')
+            self.assertEqual(transcribe.requested_output_path(Path('custom'), source), output_dir/'261411-0907__custom')
+            self.assertEqual(transcribe.requested_output_path(Path('output/custom'), source), output_dir/'261411-0907__custom')
+            self.assertEqual(transcribe.requested_output_path(Path('.'), source), output_dir/'261411-0907__meeting.transcript')
             with self.assertRaisesRegex(ValueError, 'stay inside output'):
                 transcribe.requested_output_path(Path('../outside'), source)
-            self.assertEqual(transcribe.requested_output_path(self.directory/'external', source), self.directory/'external')
+            self.assertEqual(transcribe.requested_output_path(self.directory/'external', source), self.directory/'261411-0907__external')
 
     def test_console_is_quiet_without_debug_and_file_keeps_diagnostics(self):
         from transformers.utils import logging as transformers_logging

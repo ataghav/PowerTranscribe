@@ -3,6 +3,7 @@
 import argparse
 from collections import defaultdict
 from contextlib import contextmanager
+from datetime import datetime
 import gc
 import json
 import logging
@@ -493,8 +494,9 @@ def resolve_audio_path(path):
 
 
 def requested_output_path(option, source):
+    prefix = datetime.now().strftime('%y%d%m-%H%M__')
     if option is None:
-        return OUTPUT_DIR/(source.stem+'.transcript')
+        return OUTPUT_DIR/(prefix+source.stem+'.transcript')
     option = option.expanduser()
     if option.is_absolute():
         candidate = option.resolve()
@@ -504,7 +506,9 @@ def requested_output_path(option, source):
         candidate = (OUTPUT_DIR/option).resolve()
     if not option.is_absolute() and not candidate.is_relative_to(OUTPUT_DIR.resolve()):
         raise ValueError('Relative --out paths must stay inside output/; use an absolute path for another location')
-    return OUTPUT_DIR/(source.stem+'.transcript') if candidate == OUTPUT_DIR.resolve() else candidate
+    if candidate == OUTPUT_DIR.resolve():
+        candidate = OUTPUT_DIR/(source.stem+'.transcript')
+    return candidate.with_name(prefix+candidate.name)
 
 
 def main():
